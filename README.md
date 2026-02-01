@@ -65,6 +65,32 @@ def generate_text(prompt: str) -> str:
 text = generate_text("Write a haiku about Python")
 ```
 
+### LangChain
+
+Create a callback handler and pass it to `config={"callbacks": [traccia_handler]}`. Install the optional extra: `pip install traccia[langchain]`.
+
+```python
+from traccia import init
+from traccia.integrations.langchain import CallbackHandler  # or TracciaCallbackHandler
+from langchain_openai import ChatOpenAI
+
+init()
+
+# Create Traccia handler (no args)
+traccia_handler = CallbackHandler()
+
+# Use with any LangChain runnable
+llm = ChatOpenAI(model="gpt-4o-mini")
+result = llm.invoke(
+    "Tell me a joke",
+    config={"callbacks": [traccia_handler]}
+)
+```
+
+Spans for LLM/chat model runs are created automatically with the same attributes as direct OpenAI instrumentation (model, prompt, usage, cost).
+
+**Note:** `pip install traccia[langchain]` installs traccia plus `langchain-core`; you need this extra to use the callback handler. If you already have `langchain-core` (e.g. from `langchain` or `langchain-openai`), base `pip install traccia` may be enough at runtime, but `traccia[langchain]` is the supported way to get a compatible dependency.
+
 ---
 
 ## 📖 Configuration
@@ -602,7 +628,7 @@ pytest traccia/tests/ --cov=traccia --cov-report=html
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) for details
+Apache License 2.0 - see [LICENSE](LICENSE) for full terms and conditions.
 
 ---
 
