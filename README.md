@@ -140,7 +140,7 @@ api_key = ""
 
 # Endpoint URL for OTLP trace ingestion
 # Works with Grafana Tempo, Jaeger, Zipkin, and other OTLP-compatible backends
-endpoint = "https://rtdqiachrygdgs6e7ahtl7ulci0bjdbu.lambda-url.ap-south-1.on.aws/v2/traces"
+endpoint = "http://localhost:4318/v1/traces"
 
 sample_rate = 1.0           # 0.0 to 1.0
 auto_start_trace = true     # Auto-start root trace on init
@@ -382,7 +382,7 @@ traccia doctor
 # 
 # 📊 Configuration summary:
 #    • API Key: ❌ Not set (optional)
-#    • Endpoint: https://rtdqiachrygdgs6e7ahtl7ulci0bjdbu.lambda-url.ap-south-1.on.aws/v2/traces
+#    • Endpoint: http://localhost:4318/v1/traces
 #    • Sample Rate: 1.0
 #    • OTLP Exporter: ✅ Enabled
 ```
