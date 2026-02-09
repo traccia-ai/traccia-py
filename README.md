@@ -11,6 +11,7 @@ Traccia is a lightweight, high-performance Python SDK for observability and trac
 - **🔍 Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, requests, and HTTP libraries
 - **🤖 Framework Integrations**: Support for LangChain, CrewAI, and OpenAI Agents SDK
 - **📊 LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically
+- **📈 OpenTelemetry Metrics**: Emit OTEL-compliant metrics for accurate cost/token tracking (independent of sampling)
 - **⚡ Zero-Config Start**: Simple `init()` call with automatic config discovery
 - **🎯 Decorator-Based**: Trace any function with `@observe` decorator
 - **🔧 Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console, or File
@@ -200,6 +201,11 @@ max_queue_size = 5000           # Max buffered spans
 max_block_ms = 100              # Max ms to block before dropping
 max_export_batch_size = 512     # Spans per export batch
 schedule_delay_millis = 5000    # Delay between batches
+
+[metrics]
+enable_metrics = true           # Enable OpenTelemetry metrics
+# metrics_endpoint = ""         # Defaults to {traces_base}/v2/metrics
+metrics_sample_rate = 1.0       # Metrics sampling rate (1.0 = 100%)
 
 [runtime]
 # Optional runtime metadata
@@ -479,6 +485,80 @@ def call_openai(prompt):
 # - llm.cost.total (in USD)
 ```
 
+### Metrics
+
+Traccia emits OTEL-compliant metrics for accurate cost and token tracking, independent of trace sampling.
+
+#### Why Metrics?
+
+With trace sampling (e.g., `sample_rate=0.1`), only 10% of traces are exported. Cost calculated from traces will be **10x underestimated**. Metrics solve this by recording data for **every** LLM call, regardless of sampling.
+
+#### Default Metrics
+
+Traccia automatically emits these metrics:
+
+| Metric | Type | Unit | Description |
+|--------|------|------|-------------|
+| `gen_ai.client.token.usage` | Histogram | `{token}` | Input/output tokens per call |
+| `gen_ai.client.operation.duration` | Histogram | `s` | LLM operation duration |
+| `gen_ai.client.operation.cost` | Histogram | `usd` | Cost per call (USD) |
+| `gen_ai.client.completions.exceptions` | Counter | `1` | Exception count |
+| `gen_ai.agent.runs` | Counter | `1` | Agent runs (CrewAI, OpenAI Agents) |
+| `gen_ai.agent.turns` | Counter | `1` | Agent turns |
+| `gen_ai.agent.execution_time` | Histogram | `s` | Agent execution time |
+
+**Attributes**: `gen_ai.system` (openai, anthropic), `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.agent.name`
+
+#### Configuration
+
+```python
+from traccia import init
+
+init(
+    enable_metrics=True,  # Default: True
+    metrics_endpoint="https://your-backend.com/v2/metrics",  
+    metrics_sample_rate=1.0,  # Default: 1.0 (100%)
+)
+```
+
+Or via `traccia.toml`:
+
+```toml
+[metrics]
+enable_metrics = true
+metrics_endpoint = "https://your-backend.com/v2/metrics"
+metrics_sample_rate = 1.0
+```
+
+Or via environment variables:
+
+```bash
+export TRACCIA_ENABLE_METRICS=true
+export TRACCIA_METRICS_ENDPOINT=https://your-backend.com/v2/metrics
+export TRACCIA_METRICS_SAMPLE_RATE=1.0
+```
+
+#### Custom Metrics
+
+Record your own metrics:
+
+```python
+from traccia.metrics import record_counter, record_histogram
+
+# Record a counter
+record_counter("my_custom_events", 1, {"event_type": "user_action"})
+
+# Record a histogram
+record_histogram("my_custom_latency", 0.123, {"service": "api"}, unit="s")
+```
+
+#### Agent Metrics vs. Plain LLM Calls
+
+Agent-level metrics (such as `gen_ai.agent.runs` and `gen_ai.agent.execution_time`) are only emitted when Traccia can
+see a real **agent lifecycle** (for example, CrewAI crews or OpenAI Agents SDK runs). For plain OpenAI/Anthropic calls
+and most simple LangChain usages, you will still get full LLM metrics (`gen_ai.client.*`), but no agent metrics unless
+you build an explicit agent abstraction on top.
+
 ---
 
 ## 🔧 Troubleshooting
@@ -540,6 +620,9 @@ Initialize the Traccia SDK.
 - `enable_patching` (bool, optional): Auto-patch libraries
 - `enable_token_counting` (bool, optional): Count tokens
 - `enable_costs` (bool, optional): Calculate costs
+- `enable_metrics` (bool, optional): Enable OTEL metrics (default: True)
+- `metrics_endpoint` (str, optional): Metrics endpoint
+- `metrics_sample_rate` (float, optional): Metrics sampling (default: 1.0)
 - `max_spans_per_second` (float, optional): Rate limit
 - `**kwargs`: Any other config parameter
 

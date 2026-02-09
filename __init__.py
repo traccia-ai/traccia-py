@@ -3,6 +3,7 @@
 from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
+from traccia import metrics
 
 # Version exposure
 try:
@@ -69,5 +70,6 @@ __all__ = [
     "end_auto_trace",
     "span",
     "observe",
+    "metrics",
 ]
 

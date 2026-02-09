@@ -28,6 +28,10 @@ from traccia import config as sdk_config
 from traccia import runtime_config
 from traccia import auto_instrumentation
 
+# Metrics imports
+from traccia.metrics import StandardMetrics, MetricsRecorder
+from traccia.metrics.recorder import set_global_recorder
+
 _started = False
 _registered_shutdown = False
 _active_processor: Optional[BatchSpanProcessor] = None
@@ -333,6 +337,9 @@ def start_tracing(
     max_block_ms: int = 100,  # Rate limiting block time
     openai_agents: Optional[bool] = None,  # Auto-install OpenAI Agents integration
     crewai: Optional[bool] = None,  # Auto-install CrewAI integration
+    enable_metrics: bool = True,  # Enable metrics
+    metrics_endpoint: Optional[str] = None,  # Metrics endpoint
+    metrics_sample_rate: float = 1.0,  # Metrics sampling rate
 ) -> TracerProvider:
     """
     Initialize global tracing:
@@ -545,6 +552,16 @@ def start_tracing(
         _register_shutdown(provider, _active_processor)
     _start_pricing_refresh(cost_processor, pricing_override, pricing_refresh_seconds)
 
+    # Initialize metrics if enabled
+    if enable_metrics:
+        _initialize_metrics(
+            endpoint=endpoint,
+            api_key=key,
+            metrics_endpoint=metrics_endpoint,
+            metrics_sample_rate=metrics_sample_rate,
+            service_name=_resolve_service_name(service_name)
+        )
+
     # Auto-instrument in-repo functions/tools if enabled
     if auto_instrument_tools and tool_include:
         try:
@@ -739,6 +756,85 @@ def _stop_pricing_refresh() -> None:
         _pricing_refresh_stop.set()
     if _pricing_refresh_thread:
         _pricing_refresh_thread.join(timeout=1)
+
+
+def _initialize_metrics(
+    endpoint: Optional[str],
+    api_key: Optional[str],
+    metrics_endpoint: Optional[str],
+    metrics_sample_rate: float,
+    service_name: str
+) -> None:
+    """Initialize OpenTelemetry MeterProvider and metrics."""
+    try:
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+        from opentelemetry.sdk.resources import Resource
+    except ImportError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "OpenTelemetry metrics SDK not installed. Metrics disabled. "
+            "Install with: pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http"
+        )
+        return
+
+    # Determine metrics endpoint: default to {traces_base}/v2/metrics
+    if not metrics_endpoint:
+        if endpoint:
+            # Replace /v1/traces or /v2/traces with /v2/metrics
+            if endpoint.endswith("/v1/traces"):
+                metrics_endpoint = endpoint.replace("/v1/traces", "/v2/metrics")
+            elif endpoint.endswith("/v2/traces"):
+                metrics_endpoint = endpoint.replace("/v2/traces", "/v2/metrics")
+            else:
+                # Append /v2/metrics to base
+                metrics_endpoint = endpoint.rstrip("/") + "/v2/metrics"
+        else:
+            # Use default endpoint
+            metrics_endpoint = DEFAULT_ENDPOINT.replace("/v1/traces", "/v2/metrics")
+
+    # Create resource with service.name
+    resource_attrs = {"service.name": service_name}
+    resource = Resource(attributes=resource_attrs)
+
+    # Create OTLP metric exporter with API key
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    metric_exporter = OTLPMetricExporter(
+        endpoint=metrics_endpoint,
+        headers=headers
+    )
+
+    # Create metric reader with periodic export
+    metric_reader = PeriodicExportingMetricReader(
+        exporter=metric_exporter,
+        export_interval_millis=5000  # Export every 5 seconds
+    )
+
+    # Create MeterProvider
+    meter_provider = MeterProvider(
+        resource=resource,
+        metric_readers=[metric_reader]
+    )
+    metrics.set_meter_provider(meter_provider)
+
+    # Create meter and standard metrics
+    meter = metrics.get_meter("traccia", "1.0.0")
+    standard_metrics = StandardMetrics.create_standard_metrics(meter)
+
+    # Create metrics recorder
+    recorder = MetricsRecorder(standard_metrics, sample_rate=metrics_sample_rate)
+    recorder._meter = meter  # Store meter for custom metrics
+    
+    # Set global recorder
+    set_global_recorder(recorder)
+
+    import logging
+    logging.getLogger(__name__).info(f"Metrics initialized: endpoint={metrics_endpoint}, sample_rate={metrics_sample_rate}")
 
 
 def _install_integrations(

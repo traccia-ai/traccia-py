@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, TYPE_CHECKING
+import time
+from typing import Any, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     try:
@@ -33,6 +34,7 @@ class TracciaAgentsTracingProcessor:
         """Initialize the processor."""
         self._trace_map = {}  # Map Agents trace_id -> Traccia trace context
         self._span_map = {}   # Map Agents span_id -> Traccia span
+        self._span_start_times = {}  # Map span_id -> start time
         self._tracer = None
 
     def _get_tracer(self):
@@ -75,8 +77,9 @@ class TracciaAgentsTracingProcessor:
             attributes = self._extract_attributes(span_data)
             traccia_span = tracer.start_span(span_name, attributes=attributes)
             
-            # Store mapping
+            # Store mapping and start time
             self._span_map[span.span_id] = traccia_span
+            self._span_start_times[span.span_id] = time.time()
         except Exception:
             # Don't break agent execution
             pass
@@ -87,6 +90,8 @@ class TracciaAgentsTracingProcessor:
             traccia_span = self._span_map.pop(span.span_id, None)
             if not traccia_span:
                 return
+            
+            start_time = self._span_start_times.pop(span.span_id, None)
             
             # Update attributes with final data
             span_data = span.span_data
@@ -99,6 +104,23 @@ class TracciaAgentsTracingProcessor:
                 error_msg = str(error.get("message", "Unknown error") if isinstance(error, dict) else error)
                 traccia_span.set_status(SpanStatus.ERROR, error_msg)
             
+            span_type = getattr(span_data, "type", None)
+            
+            # Record agent metrics if this is an agent span
+            if span_type == "agent" and start_time is not None:
+                execution_time = time.time() - start_time
+                agent_name = getattr(span_data, "name", None)
+                self._record_agent_metrics(
+                    agent_id=None,  # OpenAI Agents doesn't expose agent ID
+                    agent_name=agent_name,
+                    execution_time=execution_time,
+                    is_run=True  # Agent spans represent runs
+                )
+            
+            # Record token/cost metrics if this is a generation span
+            if span_type == "generation":
+                self._record_generation_metrics(span_data, start_time)
+            
             # End the span
             traccia_span.end()
         except Exception:
@@ -108,6 +130,86 @@ class TracciaAgentsTracingProcessor:
                     traccia_span.end()
             except:
                 pass
+    
+    def _record_agent_metrics(
+        self,
+        agent_id: Any,
+        agent_name: Any,
+        execution_time: float,
+        is_run: bool
+    ):
+        """Record agent metrics if metrics are enabled."""
+        try:
+            from traccia.metrics.recorder import get_metrics_recorder
+            recorder = get_metrics_recorder()
+            if not recorder:
+                return
+            
+            # Build attributes
+            attributes = {}
+            if agent_id:
+                attributes["gen_ai.agent.id"] = str(agent_id)
+            if agent_name:
+                attributes["gen_ai.agent.name"] = str(agent_name)
+            
+            # Record agent run
+            if is_run:
+                recorder.record_agent_run(attributes=attributes)
+            
+            # Record execution time
+            if execution_time is not None:
+                recorder.record_agent_execution_time(execution_time, attributes=attributes)
+        except Exception:
+            # Silently fail if metrics recording fails
+            pass
+
+    def _record_generation_metrics(self, span_data: Any, start_time: Optional[float]) -> None:
+        """Record token usage, cost, and duration metrics for generation spans."""
+        try:
+            from traccia.metrics.recorder import get_metrics_recorder
+            recorder = get_metrics_recorder()
+            if not recorder:
+                return
+            
+            usage = getattr(span_data, "usage", None)
+            if not usage or not isinstance(usage, dict):
+                return
+            
+            # Support both Response API (input_tokens/output_tokens) and Completions API (prompt_tokens/completion_tokens)
+            prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+            completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+            
+            model = getattr(span_data, "model", None)
+            if not model:
+                return
+            
+            attributes = {"gen_ai.system": "openai.agents", "gen_ai.request.model": str(model)}
+            
+            # Duration
+            if start_time is not None:
+                duration = time.time() - start_time
+                recorder.record_duration(duration, attributes=attributes)
+            
+            # Tokens
+            if prompt_tokens is not None or completion_tokens is not None:
+                recorder.record_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    attributes=attributes
+                )
+            
+            # Cost
+            if prompt_tokens is not None and completion_tokens is not None:
+                try:
+                    from traccia.processors.cost_engine import compute_cost
+                    from traccia.pricing_config import load_pricing
+                    cost = compute_cost(str(model), prompt_tokens, completion_tokens, load_pricing())
+                    if cost is not None and cost > 0:
+                        recorder.record_cost(cost, attributes=attributes)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _get_span_name(self, span_data: Any) -> str:
         """Determine Traccia span name from Agents span data."""

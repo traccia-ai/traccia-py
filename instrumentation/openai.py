@@ -2,11 +2,65 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Optional, Callable
 from traccia.tracer.span import SpanStatus
 
 _patched = False
 _responses_patched = False
+
+
+def _compute_cost(model: Optional[str], prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
+    """Compute cost from token usage using pricing config."""
+    if not model or prompt_tokens is None or completion_tokens is None:
+        return None
+    try:
+        from traccia.processors.cost_engine import compute_cost as _compute
+        from traccia.pricing_config import load_pricing
+        return _compute(model, prompt_tokens, completion_tokens, load_pricing())
+    except Exception:
+        return None
+
+
+def _record_llm_metrics(
+    model: Optional[str],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    duration: Optional[float],
+    cost: Optional[float]
+):
+    """Record LLM metrics if metrics are enabled."""
+    try:
+        from traccia.metrics.recorder import get_metrics_recorder
+        recorder = get_metrics_recorder()
+        if not recorder:
+            return
+        
+        # Build attributes
+        attributes = {
+            "gen_ai.system": "openai",
+        }
+        if model:
+            attributes["gen_ai.request.model"] = model
+        
+        # Record token usage
+        if prompt_tokens is not None or completion_tokens is not None:
+            recorder.record_token_usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                attributes=attributes
+            )
+        
+        # Record duration
+        if duration is not None:
+            recorder.record_duration(duration, attributes=attributes)
+        
+        # Record cost
+        if cost is not None:
+            recorder.record_cost(cost, attributes=attributes)
+    except Exception:
+        # Silently fail if metrics recording fails
+        pass
 
 
 def _safe_get(obj, path: str, default=None):
@@ -103,6 +157,7 @@ def patch_openai() -> bool:
                     attributes["llm.openai.messages"] = str(messages_slim)[:1000]
             if prompt_text:
                 attributes["llm.prompt"] = prompt_text
+            t0 = time.perf_counter()
             with tracer.start_as_current_span("llm.openai.chat.completions", attributes=attributes) as span:
                 try:
                     resp = create_fn(*args, **kwargs)
@@ -111,12 +166,18 @@ def patch_openai() -> bool:
                     if resp_model and "llm.model" not in span.attributes:
                         span.set_attribute("llm.model", resp_model)
                     usage = getattr(resp, "usage", None) or (resp.get("usage") if isinstance(resp, dict) else None)
+                    prompt_tokens_val = None
+                    completion_tokens_val = None
                     if usage:
                         span.set_attribute("llm.usage.source", "provider_usage")
                         for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
                             val = getattr(usage, k, None) if not isinstance(usage, dict) else usage.get(k)
                             if val is not None:
                                 span.set_attribute(f"llm.usage.{k}", val)
+                                if k == "prompt_tokens":
+                                    prompt_tokens_val = val
+                                elif k == "completion_tokens":
+                                    completion_tokens_val = val
                         if "llm.usage.prompt_tokens" in span.attributes:
                             span.set_attribute("llm.usage.prompt_source", "provider_usage")
                         if "llm.usage.completion_tokens" in span.attributes:
@@ -127,10 +188,33 @@ def patch_openai() -> bool:
                     completion = _safe_get(resp, "choices.0.message.content")
                     if completion:
                         span.set_attribute("llm.completion", completion)
+                    
+                    # Record metrics
+                    duration_val = time.perf_counter() - t0
+                    cost_val = _compute_cost(
+                        resp_model or model,
+                        prompt_tokens_val,
+                        completion_tokens_val
+                    )
+                    _record_llm_metrics(
+                        model=resp_model or model,
+                        prompt_tokens=prompt_tokens_val,
+                        completion_tokens=completion_tokens_val,
+                        duration=duration_val,
+                        cost=cost_val
+                    )
+                    
                     return resp
                 except Exception as exc:
                     span.record_exception(exc)
                     span.set_status(SpanStatus.ERROR, str(exc))
+                    try:
+                        from traccia.metrics.recorder import get_metrics_recorder
+                        rec = get_metrics_recorder()
+                        if rec:
+                            rec.record_exception(attributes={"gen_ai.system": "openai", "gen_ai.request.model": model or "unknown"})
+                    except Exception:
+                        pass
                     raise
 
         wrapped_create._agent_trace_patched = True
@@ -276,6 +360,7 @@ def patch_openai_responses() -> bool:
             if prompt_text:
                 attributes["llm.prompt"] = prompt_text[:2000]
             
+            t0 = time.perf_counter()
             with tracer.start_as_current_span("llm.openai.responses", attributes=attributes) as span:
                 try:
                     resp = await create_fn(*args, **kwargs)
@@ -287,6 +372,8 @@ def patch_openai_responses() -> bool:
                     
                     # Extract usage
                     usage = getattr(resp, "usage", None) or _safe_get(resp, "usage")
+                    input_tokens_val = None
+                    output_tokens_val = None
                     if usage:
                         span.set_attribute("llm.usage.source", "provider_usage")
                         input_tokens = getattr(usage, "input_tokens", None) or (usage.get("input_tokens") if isinstance(usage, dict) else None)
@@ -297,10 +384,12 @@ def patch_openai_responses() -> bool:
                             span.set_attribute("llm.usage.prompt_tokens", input_tokens)
                             span.set_attribute("llm.usage.input_tokens", input_tokens)
                             span.set_attribute("llm.usage.prompt_source", "provider_usage")
+                            input_tokens_val = input_tokens
                         if output_tokens is not None:
                             span.set_attribute("llm.usage.completion_tokens", output_tokens)
                             span.set_attribute("llm.usage.output_tokens", output_tokens)
                             span.set_attribute("llm.usage.completion_source", "provider_usage")
+                            output_tokens_val = output_tokens
                         if total_tokens is not None:
                             span.set_attribute("llm.usage.total_tokens", total_tokens)
                     
@@ -314,10 +403,32 @@ def patch_openai_responses() -> bool:
                     if status:
                         span.set_attribute("llm.response.status", str(status))
                     
+                    # Record metrics
+                    duration_val = time.perf_counter() - t0
+                    cost_val = _compute_cost(
+                        resp_model or model,
+                        input_tokens_val,
+                        output_tokens_val
+                    )
+                    _record_llm_metrics(
+                        model=resp_model or model,
+                        prompt_tokens=input_tokens_val,
+                        completion_tokens=output_tokens_val,
+                        duration=duration_val,
+                        cost=cost_val
+                    )
+                    
                     return resp
                 except Exception as exc:
                     span.record_exception(exc)
                     span.set_status(SpanStatus.ERROR, str(exc))
+                    try:
+                        from traccia.metrics.recorder import get_metrics_recorder
+                        rec = get_metrics_recorder()
+                        if rec:
+                            rec.record_exception(attributes={"gen_ai.system": "openai", "gen_ai.request.model": model or "unknown"})
+                    except Exception:
+                        pass
                     raise
 
         wrapped_create._agent_trace_patched = True

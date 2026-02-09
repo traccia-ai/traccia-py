@@ -81,7 +81,9 @@ def _config_init(args) -> int:
     
     # Create config template with important parameters
     config_template = """# Traccia SDK Configuration File
-# Documentation: https://github.com/traccia-ai/traccia
+# NOTE: This file only includes the most commonly used options.
+# For a complete list of configuration keys (including advanced and metrics options),
+# see the official docs: https://traccia.ai/docs/reference/configuration
 
 [tracing]
 # API key for authentication (required for SaaS, optional for open-source)
@@ -157,6 +159,17 @@ max_export_batch_size = 512
 
 # Delay in milliseconds between export batches
 schedule_delay_millis = 5000
+
+[metrics]
+# Enable OpenTelemetry metrics emission (LLM & agent metrics)
+enable_metrics = true
+
+# Metrics endpoint URL (defaults to {traces_base}/v2/metrics). Override this to
+# send metrics to a different OTLP/HTTP endpoint (e.g. OTEL Collector):
+# metrics_endpoint = "http://localhost:4318/v1/metrics"
+
+# Metrics sampling rate (0.0 to 1.0, default: 1.0 = 100%)
+metrics_sample_rate = 1.0
 
 [runtime]
 # Runtime metadata (optional - can be set per-session)

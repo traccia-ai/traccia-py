@@ -25,9 +25,12 @@ def patch_requests() -> bool:
         return True
 
     def wrapped_request(self, method, url, *args, **kwargs):
-        # Skip instrumentation for trace ingestion endpoints to prevent feedback loop
+        # Skip instrumentation for trace/metrics ingestion endpoints to prevent feedback loop
         url_str = str(url) if url else ""
-        ingestion_paths = ["/v1/traces", "/v2/traces", "/api/v1/traces", "/api/v2/traces"]
+        ingestion_paths = [
+            "/v1/traces", "/v2/traces", "/api/v1/traces", "/api/v2/traces",
+            "/v1/metrics", "/v2/metrics", "/api/v1/metrics", "/api/v2/metrics",
+        ]
         if any(path in url_str for path in ingestion_paths):
             # This is likely an exporter endpoint - don't instrument it
             import requests

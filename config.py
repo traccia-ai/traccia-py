@@ -55,6 +55,11 @@ ENV_VAR_MAPPING = {
     "debug": ["TRACCIA_DEBUG"],
     "enable_span_logging": ["TRACCIA_ENABLE_SPAN_LOGGING"],
     
+    # Metrics
+    "enable_metrics": ["TRACCIA_ENABLE_METRICS"],
+    "metrics_endpoint": ["TRACCIA_METRICS_ENDPOINT"],
+    "metrics_sample_rate": ["TRACCIA_METRICS_SAMPLE_RATE"],
+    
     # Advanced
     "attr_truncation_limit": ["TRACCIA_ATTR_TRUNCATION_LIMIT"],
 }
@@ -216,6 +221,25 @@ class LoggingConfig(BaseModel):
     )
 
 
+class MetricsConfig(BaseModel):
+    """Metrics configuration section."""
+    
+    enable_metrics: bool = Field(
+        default=True,
+        description="Enable OpenTelemetry metrics emission"
+    )
+    metrics_endpoint: Optional[str] = Field(
+        default=None,
+        description="Metrics endpoint URL (defaults to {traces_base}/v2/metrics)"
+    )
+    metrics_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Metrics sampling rate (0.0 to 1.0, default: 1.0 = 100%)"
+    )
+
+
 class RuntimeConfig(BaseModel):
     """Runtime metadata configuration section."""
     
@@ -265,6 +289,7 @@ class TracciaConfig(BaseModel):
     exporters: ExporterConfig = Field(default_factory=ExporterConfig)
     instrumentation: InstrumentationConfig = Field(default_factory=InstrumentationConfig)
     rate_limiting: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
@@ -317,6 +342,10 @@ class TracciaConfig(BaseModel):
             "max_block_ms": self.rate_limiting.max_block_ms,
             "max_export_batch_size": self.rate_limiting.max_export_batch_size,
             "schedule_delay_millis": self.rate_limiting.schedule_delay_millis,
+            # Metrics
+            "enable_metrics": self.metrics.enable_metrics,
+            "metrics_endpoint": self.metrics.metrics_endpoint,
+            "metrics_sample_rate": self.metrics.metrics_sample_rate,
             # Runtime
             "session_id": self.runtime.session_id,
             "user_id": self.runtime.user_id,
@@ -442,6 +471,7 @@ def load_config_from_env(flat: bool = False) -> Dict[str, Any]:
         "exporters": {},
         "instrumentation": {},
         "rate_limiting": {},
+        "metrics": {},
         "runtime": {},
         "logging": {},
         "advanced": {},
@@ -501,6 +531,23 @@ def load_config_from_env(flat: bool = False) -> Dict[str, Any]:
                 env_config["rate_limiting"][key] = int(value)
             except ValueError:
                 raise ConfigError(f"Invalid {key} value: {value}. Must be a number.")
+    
+    # Metrics section
+    for key in ["enable_metrics"]:
+        value = get_env_value(key)
+        if value is not None:
+            env_config["metrics"][key] = value.lower() in ("true", "1", "yes")
+    
+    value = get_env_value("metrics_endpoint")
+    if value is not None:
+        env_config["metrics"]["metrics_endpoint"] = value
+    
+    value = get_env_value("metrics_sample_rate")
+    if value is not None:
+        try:
+            env_config["metrics"]["metrics_sample_rate"] = float(value)
+        except ValueError:
+            raise ConfigError(f"Invalid metrics_sample_rate value: {value}. Must be a float between 0.0 and 1.0.")
     
     # Runtime section
     for key in ["session_id", "user_id", "tenant_id", "project_id", "agent_id"]:
@@ -683,6 +730,10 @@ def load_config_with_priority(
             "max_block_ms": ("rate_limiting", "max_block_ms"),
             "max_export_batch_size": ("rate_limiting", "max_export_batch_size"),
             "schedule_delay_millis": ("rate_limiting", "schedule_delay_millis"),
+            # Metrics
+            "enable_metrics": ("metrics", "enable_metrics"),
+            "metrics_endpoint": ("metrics", "metrics_endpoint"),
+            "metrics_sample_rate": ("metrics", "metrics_sample_rate"),
             # Runtime
             "session_id": ("runtime", "session_id"),
             "user_id": ("runtime", "user_id"),

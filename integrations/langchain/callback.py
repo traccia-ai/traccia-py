@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, List, Optional, Set
 from uuid import UUID
 
@@ -62,6 +63,7 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         # Track active spans by run_id
         self._spans: Dict[UUID, Any] = {}
         self._context_tokens: Dict[UUID, Any] = {}
+        self._span_start_times: Dict[UUID, float] = {}
         
         # Track parent relationships
         self._parent_map: Dict[UUID, Optional[UUID]] = {}
@@ -92,9 +94,10 @@ class TracciaCallbackHandler(BaseCallbackHandler):
                 attributes=attributes
             )
             
-            # Store span
+            # Store span and start time for metrics
             self._spans[run_id] = span
             self._context_tokens[run_id] = span
+            self._span_start_times[run_id] = time.perf_counter()
             
         except Exception as e:
             # Don't break LangChain execution
@@ -133,9 +136,10 @@ class TracciaCallbackHandler(BaseCallbackHandler):
                 attributes=attributes
             )
             
-            # Store span
+            # Store span and start time for metrics
             self._spans[run_id] = span
             self._context_tokens[run_id] = span
+            self._span_start_times[run_id] = time.perf_counter()
             
         except Exception as e:
             import logging
@@ -158,12 +162,16 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             # Extract usage and output
             self._set_llm_response_attributes(span, response)
             
+            # Record metrics (tokens, cost, duration)
+            self._record_langchain_llm_metrics(span, response, run_id)
+            
             # End span
             span.__exit__(None, None, None)
             
             # Clean up context
             self._context_tokens.pop(run_id, None)
             self._parent_map.pop(run_id, None)
+            self._span_start_times.pop(run_id, None)
             
         except Exception as e:
             import logging
@@ -183,9 +191,12 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             if span is None:
                 return
             
-            # Record exception
+            # Record exception on span
             span._otel_span.record_exception(error)
             span.set_status(SpanStatus.ERROR, str(error))
+            
+            # Record exception metric
+            self._record_langchain_exception(span)
             
             # End span
             span.__exit__(type(error), error, None)
@@ -193,6 +204,7 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             # Clean up
             self._context_tokens.pop(run_id, None)
             self._parent_map.pop(run_id, None)
+            self._span_start_times.pop(run_id, None)
             
         except Exception as e:
             import logging
@@ -313,6 +325,68 @@ class TracciaCallbackHandler(BaseCallbackHandler):
                 )
                 if completion:
                     span.set_attribute("llm.completion", str(completion))
+    
+    def _record_langchain_llm_metrics(self, span: Any, response: LLMResult, run_id: UUID) -> None:
+        """Record LLM metrics (tokens, cost, duration) for LangChain runs."""
+        try:
+            from traccia.metrics.recorder import get_metrics_recorder
+            recorder = get_metrics_recorder()
+            if not recorder:
+                return
+            
+            usage = self._parse_usage(response)
+            prompt_tokens = None
+            completion_tokens = None
+            if usage:
+                prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+                completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+            
+            model = span.attributes.get("llm.model") if hasattr(span, "attributes") else None
+            vendor = span.attributes.get("llm.vendor", "langchain") if hasattr(span, "attributes") else "langchain"
+            
+            attributes = {"gen_ai.system": vendor}
+            if model:
+                attributes["gen_ai.request.model"] = model
+            
+            # Duration
+            t0 = self._span_start_times.get(run_id)
+            if t0 is not None:
+                duration = time.perf_counter() - t0
+                recorder.record_duration(duration, attributes=attributes)
+            
+            # Tokens
+            if prompt_tokens is not None or completion_tokens is not None:
+                recorder.record_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    attributes=attributes
+                )
+            
+            # Cost
+            if model and prompt_tokens is not None and completion_tokens is not None:
+                try:
+                    from traccia.processors.cost_engine import compute_cost
+                    from traccia.pricing_config import load_pricing
+                    cost = compute_cost(model, prompt_tokens, completion_tokens, load_pricing())
+                    if cost is not None and cost > 0:
+                        recorder.record_cost(cost, attributes=attributes)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    def _record_langchain_exception(self, span: Any) -> None:
+        """Record exception metric for LangChain LLM errors."""
+        try:
+            from traccia.metrics.recorder import get_metrics_recorder
+            recorder = get_metrics_recorder()
+            if not recorder:
+                return
+            model = span.attributes.get("llm.model", "unknown") if hasattr(span, "attributes") else "unknown"
+            vendor = span.attributes.get("llm.vendor", "langchain") if hasattr(span, "attributes") else "langchain"
+            recorder.record_exception(attributes={"gen_ai.system": vendor, "gen_ai.request.model": model})
+        except Exception:
+            pass
     
     def _extract_vendor(self, serialized: Dict[str, Any]) -> Optional[str]:
         """Extract vendor from serialized LLM config."""

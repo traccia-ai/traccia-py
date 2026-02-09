@@ -4,11 +4,44 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 _instrumented = False
+
+
+def _record_agent_metrics(
+    agent_id: Optional[str],
+    agent_name: Optional[str],
+    execution_time: Optional[float],
+    is_run: bool = False
+):
+    """Record agent metrics if metrics are enabled."""
+    try:
+        from traccia.metrics.recorder import get_metrics_recorder
+        recorder = get_metrics_recorder()
+        if not recorder:
+            return
+        
+        # Build attributes
+        attributes = {}
+        if agent_id:
+            attributes["gen_ai.agent.id"] = agent_id
+        if agent_name:
+            attributes["gen_ai.agent.name"] = agent_name
+        
+        # Record agent run (for crew kickoff)
+        if is_run:
+            recorder.record_agent_run(attributes=attributes)
+        
+        # Record execution time
+        if execution_time is not None:
+            recorder.record_agent_execution_time(execution_time, attributes=attributes)
+    except Exception:
+        # Silently fail if metrics recording fails
+        pass
 
 
 def instrument_crewai() -> bool:
@@ -113,6 +146,7 @@ def _create_crew_wrapper(original_method: Callable, span_name: str) -> Callable:
         attributes = _get_crew_attributes(self)
         
         # Start span with OpenTelemetry context propagation
+        start_time = time.time()
         with tracer.start_as_current_span(
             span_name,
             attributes=attributes,
@@ -123,6 +157,17 @@ def _create_crew_wrapper(original_method: Callable, span_name: str) -> Callable:
                 
                 # Add result attributes
                 _add_crew_result_attributes(span, result)
+                
+                # Record agent metrics
+                execution_time = time.time() - start_time
+                crew_id = getattr(self, "id", None)
+                crew_name = getattr(self, "name", None) or "crew"
+                _record_agent_metrics(
+                    agent_id=str(crew_id) if crew_id else None,
+                    agent_name=crew_name,
+                    execution_time=execution_time,
+                    is_run=True  # Crew kickoff is an agent run
+                )
                 
                 return result
             except Exception as e:
@@ -205,6 +250,7 @@ def _create_agent_wrapper(original_method: Callable, span_name: str) -> Callable
         full_span_name = f"crewai.agent.{agent_role}"
         
         # Start span - this will automatically nest under task span if one exists
+        start_time = time.time()
         with tracer.start_as_current_span(
             full_span_name,
             attributes=attributes,
@@ -216,6 +262,16 @@ def _create_agent_wrapper(original_method: Callable, span_name: str) -> Callable
                 
                 # Add result attributes
                 _safe_set_attribute(span, "crewai.agent.result", str(result)[:1000])
+                
+                # Record agent turn metrics
+                execution_time = time.time() - start_time
+                agent_id = getattr(self, "id", None)
+                _record_agent_metrics(
+                    agent_id=str(agent_id) if agent_id else None,
+                    agent_name=agent_role,
+                    execution_time=execution_time,
+                    is_run=False  # This is a turn, not a run
+                )
                 
                 return result
             except Exception as e:
@@ -289,6 +345,31 @@ def _create_llm_wrapper(original_method: Callable, span_name: str) -> Callable:
                                 _safe_set_attribute(span, "crewai.llm.token_usage.prompt", token_process.prompt_tokens)
                             if hasattr(token_process, "completion_tokens"):
                                 _safe_set_attribute(span, "crewai.llm.token_usage.completion", token_process.completion_tokens)
+                            
+                            # Record metrics for token usage and cost
+                            prompt_tokens = getattr(token_process, "prompt_tokens", None)
+                            completion_tokens = getattr(token_process, "completion_tokens", None)
+                            model = getattr(self, "model", None)
+                            if (prompt_tokens is not None or completion_tokens is not None) and model:
+                                try:
+                                    from traccia.metrics.recorder import get_metrics_recorder
+                                    recorder = get_metrics_recorder()
+                                    if recorder:
+                                        attributes_metrics = {"gen_ai.system": "crewai", "gen_ai.request.model": str(model)}
+                                        recorder.record_token_usage(
+                                            prompt_tokens=prompt_tokens,
+                                            completion_tokens=completion_tokens,
+                                            attributes=attributes_metrics
+                                        )
+                                        if prompt_tokens is not None and completion_tokens is not None:
+                                            from traccia.processors.cost_engine import compute_cost
+                                            from traccia.pricing_config import load_pricing
+                                            cost = compute_cost(str(model), prompt_tokens, completion_tokens, load_pricing())
+                                            if cost is not None and cost > 0:
+                                                recorder.record_cost(cost, attributes=attributes_metrics)
+                                except Exception:
+                                    pass
+                            break  # Use first callback with token_cost_process
                 
                 return result
             except Exception as e:
