@@ -168,10 +168,9 @@ This creates a template config file:
 # API key (optional - for future Traccia UI, not needed for OTLP backends)
 api_key = ""
 
-# Endpoint URL for OTLP trace ingestion
-# If not set, defaults to the Traccia platform (https://api.traccia.ai/v2/traces). You can change
-# this to use your own OTLP backend (e.g. Grafana Tempo, Jaeger, Zipkin).
-endpoint = "http://localhost:4318/v1/traces"
+# Endpoint URL for OTLP trace ingestion (default: Traccia platform)
+# For local OTLP backends use e.g. endpoint = "http://localhost:4318/v1/traces"
+endpoint = "https://api.traccia.ai/v2/traces"
 
 sample_rate = 1.0           # 0.0 to 1.0
 auto_start_trace = true     # Auto-start root trace on init
@@ -424,7 +423,7 @@ traccia doctor
 # 
 # 📊 Configuration summary:
 #    • API Key: ❌ Not set (optional)
-#    • Endpoint: http://localhost:4318/v1/traces
+#    • Endpoint: https://api.traccia.ai/v2/traces
 #    • Sample Rate: 1.0
 #    • OTLP Exporter: ✅ Enabled
 ```

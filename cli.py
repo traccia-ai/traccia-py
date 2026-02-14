@@ -8,21 +8,22 @@ import sys
 import urllib.request
 from typing import Optional
 
-from traccia.config import validate_config, load_config, find_config_file, ENV_VAR_MAPPING
+from traccia.config import (
+    validate_config,
+    load_config,
+    find_config_file,
+    ENV_VAR_MAPPING,
+    DEFAULT_OTLP_TRACE_ENDPOINT,
+)
 from traccia.errors import ConfigError
 
 
 def _check(args) -> int:
     """Check connectivity to the configured exporter endpoint."""
-    # Load config to get endpoint
+    # Load config to get endpoint (same resolution as SDK: param > config > default)
     try:
         config = load_config(config_file=args.config if hasattr(args, 'config') else None)
-        endpoint = args.endpoint or config.tracing.endpoint
-        
-        if not endpoint:
-            print("❌ No endpoint configured.", file=sys.stderr)
-            print("   Set endpoint in traccia.toml or use --endpoint flag", file=sys.stderr)
-            return 1
+        endpoint = args.endpoint or config.tracing.endpoint or DEFAULT_OTLP_TRACE_ENDPOINT
         
         print(f"🔍 Checking connectivity to {endpoint}...")
         sys.stdout.flush()  # Ensure output appears before any errors
@@ -89,10 +90,9 @@ def _config_init(args) -> int:
 # API key for authentication (required for SaaS, optional for open-source)
 api_key = ""
 
-# Endpoint URL for trace ingestion
-# For local Tempo: endpoint = "http://localhost:4318/v1/traces"
-# For local Jaeger: endpoint = "http://localhost:4318/v1/traces"
-endpoint = "http://localhost:4318/v1/traces"
+# Endpoint URL for trace ingestion (default: Traccia platform)
+# For local OTLP backends use e.g. endpoint = "http://localhost:4318/v1/traces"
+endpoint = "{default_endpoint}"
 
 # Sampling rate (0.0 to 1.0) - controls what percentage of traces are sent
 sample_rate = 1.0
@@ -192,7 +192,7 @@ enable_span_logging = false
     
     try:
         with open(config_path, 'w', encoding='utf-8') as f:
-            f.write(config_template)
+            f.write(config_template.format(default_endpoint=DEFAULT_OTLP_TRACE_ENDPOINT))
         print(f"✅ Created config file at {config_path}")
         print("\n📝 Next steps:")
         print("   1. Edit the config file to add your API key and endpoint")
@@ -247,19 +247,18 @@ def _doctor(args) -> int:
         print(f"✅ {message}")
         
         # Print configuration summary
+        effective_endpoint = config.tracing.endpoint or DEFAULT_OTLP_TRACE_ENDPOINT
+        endpoint_source = "config/file" if config.tracing.endpoint else "default (Traccia platform)"
         print("\n📊 Configuration summary:")
         print(f"   • API Key: {'✅ Set' if config.tracing.api_key else '❌ Not set'}")
-        print(f"   • Endpoint: {config.tracing.endpoint or '❌ Not set'}")
+        print(f"   • Endpoint: {effective_endpoint} ({endpoint_source})")
         print(f"   • Sample Rate: {config.tracing.sample_rate}")
         print(f"   • OTLP Exporter: {'✅ Enabled' if config.tracing.use_otlp else '❌ Disabled'}")
         print(f"   • Console Exporter: {'✅ Enabled' if config.exporters.enable_console else '❌ Disabled'}")
         print(f"   • File Exporter: {'✅ Enabled' if config.exporters.enable_file else '❌ Disabled'}")
         print(f"   • Auto-patching: {'✅ Enabled' if config.instrumentation.enable_patching else '❌ Disabled'}")
         
-        # Check for potential issues
-        if config.tracing.use_otlp and not config.tracing.endpoint:
-            print("\n⚠️  Warning: OTLP exporter is enabled but no endpoint is configured")
-            issues_found += 1
+        # Check for potential issues (no warning when endpoint is unset — SDK uses default)
         
         if not config.tracing.use_otlp and not config.exporters.enable_console and not config.exporters.enable_file:
             print("\n❌ Error: No exporter is enabled! Traces won't be exported anywhere.")
