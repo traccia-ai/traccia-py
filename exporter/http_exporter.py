@@ -12,7 +12,7 @@ from traccia.tracer.span import SpanStatus
 from traccia import runtime_config
 
 TransientStatus = {429, 503, 504}
-DEFAULT_ENDPOINT = "https://api.dashboard.com/api/v1/traces"
+DEFAULT_ENDPOINT = "https://api.traccia.ai/v2/traces"
 
 
 class HttpExporter:

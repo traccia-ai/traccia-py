@@ -793,7 +793,7 @@ def _initialize_metrics(
                 metrics_endpoint = endpoint.rstrip("/") + "/v2/metrics"
         else:
             # Use default endpoint
-            metrics_endpoint = DEFAULT_ENDPOINT.replace("/v1/traces", "/v2/metrics")
+            metrics_endpoint = DEFAULT_ENDPOINT.replace("/v2/traces", "/v2/metrics")
 
     # Create resource with service.name
     resource_attrs = {"service.name": service_name}
