@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 from typing import Optional, Any
 
-from traccia.exporter import HttpExporter, ConsoleExporter, FileExporter, OTLPExporter
-from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT, DEFAULT_ENDPOINT
+from traccia.exporter import ConsoleExporter, FileExporter, OTLPExporter
+from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT
 from traccia.instrumentation import patch_anthropic, patch_openai, patch_requests
 from traccia.processors import (
     BatchSpanProcessor,
@@ -343,7 +343,7 @@ def start_tracing(
 ) -> TracerProvider:
     """
     Initialize global tracing:
-    - Builds HttpExporter (or uses provided one)
+    - Builds OTLP exporter (or uses provided one)
     - Attaches BatchSpanProcessor with sampling and bounded queue
     - Registers monkey patches (OpenAI, Anthropic, requests)
     - Registers atexit shutdown hook
@@ -385,6 +385,18 @@ def start_tracing(
     except Exception:
         sample_rate = sample_rate
 
+    # Validate exporter configuration when OTLP is disabled
+    if not use_otlp and not (enable_console_exporter or enable_file_exporter):
+        from traccia.errors import ConfigError
+        raise ConfigError(
+            "When use_otlp is false, you must enable either console or file exporter.",
+            details={
+                "use_otlp": use_otlp,
+                "enable_console_exporter": enable_console_exporter,
+                "enable_file_exporter": enable_file_exporter,
+            },
+        )
+
     # Set runtime config for auto-instrumentation
     runtime_config.set_auto_instrument_tools(auto_instrument_tools)
     runtime_config.set_tool_include(tool_include or [])
@@ -421,7 +433,7 @@ def start_tracing(
     if runtime_config.get_debug():
         resource_attrs["trace.debug"] = True
     
-    # Update provider resource dict (for HttpExporter compatibility)
+    # Update provider resource dict for exporter compatibility
     if resource_attrs:
         provider.resource.update(resource_attrs)
     
@@ -442,7 +454,7 @@ def start_tracing(
         for proc in provider._export_processors:
             provider._otel_provider.add_span_processor(proc)
 
-    # Use OTLP exporter by default, fall back to HttpExporter if use_otlp=False
+    # Use OTLP exporter by default for network export
     if exporter:
         network_exporter = exporter
     elif use_otlp:
@@ -452,12 +464,8 @@ def start_tracing(
             api_key=key,
         )
     else:
-        # Legacy HttpExporter for backward compatibility
-        network_exporter = HttpExporter(
-            endpoint=endpoint or DEFAULT_OTLP_TRACE_ENDPOINT,
-            api_key=key,
-            transport=transport,
-        )
+        # When use_otlp is False, rely on console/file exporters only
+        network_exporter = None
 
     if enable_console_exporter:
         network_exporter = _combine_exporters(network_exporter, ConsoleExporter())
@@ -501,7 +509,7 @@ def start_tracing(
     )
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
-    # For HttpExporter, use our custom BatchSpanProcessor
+    # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor
     if use_otlp and isinstance(network_exporter, OTLPExporter) and hasattr(network_exporter, '_otel_exporter'):
         # Use OTel's BatchSpanProcessor for OTLP export
         from opentelemetry.sdk.trace.export import BatchSpanProcessor as OTelBatchSpanProcessor
@@ -525,7 +533,7 @@ def start_tracing(
             provider._otel_provider.add_span_processor(otel_processor)
         _active_processor = None  # OTel handles this
     else:
-        # Use our custom BatchSpanProcessor for HttpExporter
+        # Use our custom BatchSpanProcessor for non-OTLP exporters
         processor = BatchSpanProcessor(
             exporter=network_exporter,
             sampler=sampler,

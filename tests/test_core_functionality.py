@@ -10,7 +10,7 @@ from traccia import get_tracer, get_tracer_provider, set_tracer_provider
 from traccia.tracer import TracerProvider, Span, SpanStatus
 from traccia.tracer.span_context import SpanContext
 from traccia.context import get_current_span
-from traccia.exporter import ConsoleExporter, FileExporter, HttpExporter, OTLPExporter
+from traccia.exporter import ConsoleExporter, FileExporter, OTLPExporter
 from traccia.context.propagators import (
     format_traceparent, parse_traceparent,
     inject_traceparent, extract_traceparent,
@@ -207,12 +207,6 @@ class TestExporters(unittest.TestCase):
         finally:
             import os
             os.unlink(temp_path)
-    
-    def test_http_exporter_creation(self):
-        """Test HttpExporter creation."""
-        exporter = HttpExporter(endpoint="http://localhost:8080/test")
-        self.assertIsNotNone(exporter)
-        self.assertEqual(exporter.endpoint, "http://localhost:8080/test")
     
     def test_otlp_exporter_creation(self):
         """Test OTLPExporter creation."""

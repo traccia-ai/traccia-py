@@ -16,7 +16,8 @@ class FileExporter:
     Exporter that writes spans to a JSON file in JSONL format.
     
     Each export() call writes one JSON object (containing resource and scopeSpans)
-    per line, following the same format as HttpExporter.
+    per line, following the same OTLP-compatible JSON structure used by the SDK's
+    network exporters.
     """
 
     def __init__(self, file_path: str = "traces.jsonl", reset_on_start: bool = False) -> None:
@@ -77,10 +78,8 @@ class FileExporter:
 
     def _serialize(self, spans: List[Span]) -> bytes:
         """
-        Serialize spans to JSON bytes using the same format as HttpExporter.
-        
-        This method replicates the serialization logic from HttpExporter._serialize()
-        to ensure consistent format across exporters.
+        Serialize spans to JSON bytes using the same OTLP-compatible JSON structure
+        used by the SDK's network exporters.
         """
         trunc = runtime_config.get_attr_truncation_limit()
 
