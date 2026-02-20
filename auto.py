@@ -329,7 +329,10 @@ def start_tracing(
     user_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    project: Optional[str] = None,
     agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    env: Optional[str] = None,
     debug: bool = False,
     attr_truncation_limit: Optional[int] = None,
     service_name: Optional[str] = None,
@@ -405,9 +408,23 @@ def start_tracing(
     runtime_config.set_session_id(session_id)
     runtime_config.set_user_id(user_id)
     runtime_config.set_tenant_id(_resolve_tenant_id(tenant_id))
-    runtime_config.set_project_id(_resolve_project_id(project_id))
-    runtime_config.set_agent_id(agent_id)
+    runtime_config.set_project_id(_resolve_project_id(project_id or project))
+    # Resolve agent identity: explicit params > TRACCIA_* env vars
+    _agent_id = agent_id or sdk_config.get_env_value("agent_id")
+    _agent_name = agent_name or sdk_config.get_env_value("agent_name")
+    _env = env or sdk_config.get_env_value("env")
+    runtime_config.set_agent_id(_agent_id)
+    runtime_config.set_agent_name(_agent_name)
+    runtime_config.set_env(_env)
     runtime_config.set_debug(_resolve_debug(debug))
+    # Log once which source provided agent identity (for debugging "unknown-agent" issues)
+    import logging
+    _log = logging.getLogger(__name__)
+    if _agent_id or _agent_name or _env:
+        _src = "params" if (agent_id or agent_name or env) else "TRACCIA_* env"
+        _log.info("Traccia agent identity: id=%s name=%s env=%s (from %s)", _agent_id or "(none)", _agent_name or "(none)", _env or "(none)", _src)
+    elif key or endpoint:
+        _log.info("Traccia agent identity not set; traces may appear as unknown-agent in the UI. Set agent_id (and optionally env) via init() or TRACCIA_AGENT_ID / TRACCIA_ENV.")
     runtime_config.set_attr_truncation_limit(attr_truncation_limit)
 
     # Build resource attributes from runtime config
@@ -430,6 +447,11 @@ def start_tracing(
         resource_attrs["user.id"] = runtime_config.get_user_id()
     if runtime_config.get_agent_id():
         resource_attrs["agent.id"] = runtime_config.get_agent_id()
+    if runtime_config.get_agent_name():
+        resource_attrs["agent.name"] = runtime_config.get_agent_name()
+    if runtime_config.get_env():
+        resource_attrs["environment"] = runtime_config.get_env()
+        resource_attrs["env"] = runtime_config.get_env()
     if runtime_config.get_debug():
         resource_attrs["trace.debug"] = True
     
@@ -503,9 +525,14 @@ def start_tracing(
         provider.add_span_processor(cost_processor)
     if enable_span_logging:
         provider.add_span_processor(LoggingSpanProcessor())
-    # Agent enrichment should run after cost/token processors so it can fill any gaps.
+    # Agent enrichment: use init-time identity as default so span-level overrides win over resource/defaults.
     provider.add_span_processor(
-        AgentEnrichmentProcessor(agent_config_path=os.getenv("AGENT_DASHBOARD_AGENT_CONFIG"))
+        AgentEnrichmentProcessor(
+            agent_config_path=os.getenv("AGENT_DASHBOARD_AGENT_CONFIG"),
+            default_agent_id=runtime_config.get_agent_id(),
+            default_agent_name=runtime_config.get_agent_name(),
+            default_env=runtime_config.get_env(),
+        )
     )
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
@@ -567,7 +594,10 @@ def start_tracing(
             api_key=key,
             metrics_endpoint=metrics_endpoint,
             metrics_sample_rate=metrics_sample_rate,
-            service_name=_resolve_service_name(service_name)
+            service_name=_resolve_service_name(service_name),
+            agent_id=runtime_config.get_agent_id(),
+            agent_name=runtime_config.get_agent_name(),
+            env=runtime_config.get_env(),
         )
 
     # Auto-instrument in-repo functions/tools if enabled
@@ -771,7 +801,10 @@ def _initialize_metrics(
     api_key: Optional[str],
     metrics_endpoint: Optional[str],
     metrics_sample_rate: float,
-    service_name: str
+    service_name: str,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> None:
     """Initialize OpenTelemetry MeterProvider and metrics."""
     try:
@@ -803,8 +836,15 @@ def _initialize_metrics(
             # Use default endpoint
             metrics_endpoint = DEFAULT_OTLP_TRACE_ENDPOINT.replace("/v2/traces", "/v2/metrics")
 
-    # Create resource with service.name
+    # Create resource with service.name and agent identity (align with traces)
     resource_attrs = {"service.name": service_name}
+    if agent_id:
+        resource_attrs["agent.id"] = agent_id
+    if agent_name:
+        resource_attrs["agent.name"] = agent_name
+    if env:
+        resource_attrs["environment"] = env
+        resource_attrs["env"] = env
     resource = Resource(attributes=resource_attrs)
 
     # Create OTLP metric exporter with API key

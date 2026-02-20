@@ -208,11 +208,14 @@ enable_metrics = true           # Enable OpenTelemetry metrics
 metrics_sample_rate = 1.0       # Metrics sampling rate (1.0 = 100%)
 
 [runtime]
-# Optional runtime metadata
+# Optional runtime metadata (agent identity: prefer init(agent_id=..., agent_name=..., env=...) or TRACCIA_* env)
 # session_id = ""
 # user_id = ""
 # tenant_id = ""
 # project_id = ""
+# agent_id = ""   # Single-agent: set in code or TRACCIA_AGENT_ID
+# agent_name = ""
+# env = ""        # e.g. production, staging, dev
 
 [logging]
 debug = false                   # Enable debug logging
@@ -249,7 +252,7 @@ All config parameters can be set via environment variables with the `TRACCIA_` p
 
 **Rate Limiting**: `TRACCIA_MAX_SPANS_PER_SECOND`, `TRACCIA_MAX_QUEUE_SIZE`, `TRACCIA_MAX_BLOCK_MS`, `TRACCIA_MAX_EXPORT_BATCH_SIZE`, `TRACCIA_SCHEDULE_DELAY_MILLIS`
 
-**Runtime**: `TRACCIA_SESSION_ID`, `TRACCIA_USER_ID`, `TRACCIA_TENANT_ID`, `TRACCIA_PROJECT_ID`
+**Runtime**: `TRACCIA_SESSION_ID`, `TRACCIA_USER_ID`, `TRACCIA_TENANT_ID`, `TRACCIA_PROJECT_ID`, `TRACCIA_AGENT_ID`, `TRACCIA_AGENT_NAME`, `TRACCIA_ENV`
 
 **Logging**: `TRACCIA_DEBUG`, `TRACCIA_ENABLE_SPAN_LOGGING`
 
@@ -262,12 +265,15 @@ All config parameters can be set via environment variables with the `TRACCIA_` p
 ```python
 from traccia import init
 
-# Override config programmatically
+# Override config programmatically (including agent identity for single-agent services)
 init(
     endpoint="http://tempo:4318/v1/traces",
     sample_rate=0.5,
     enable_costs=True,
-    max_spans_per_second=100.0
+    max_spans_per_second=100.0,
+    agent_id="my-agent",
+    agent_name="My Agent",
+    env="production",
 )
 ```
 
