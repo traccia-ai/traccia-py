@@ -50,6 +50,9 @@ ENV_VAR_MAPPING = {
     "tenant_id": ["TRACCIA_TENANT_ID"],
     "project_id": ["TRACCIA_PROJECT_ID"],
     "agent_id": ["TRACCIA_AGENT_ID", "AGENT_DASHBOARD_AGENT_ID"],
+    "agent_name": ["TRACCIA_AGENT_NAME"],
+    "env": ["TRACCIA_ENV"],
+    "project": ["TRACCIA_PROJECT"],  # alias for project_id
     
     # Logging
     "debug": ["TRACCIA_DEBUG"],
@@ -278,6 +281,14 @@ class RuntimeConfig(BaseModel):
         default=None,
         description="Agent identifier for the current session"
     )
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="Agent display name"
+    )
+    env: Optional[str] = Field(
+        default=None,
+        description="Deployment environment (e.g. production, staging)"
+    )
 
 
 class AdvancedConfig(BaseModel):
@@ -367,6 +378,8 @@ class TracciaConfig(BaseModel):
             "tenant_id": self.runtime.tenant_id,
             "project_id": self.runtime.project_id,
             "agent_id": self.runtime.agent_id,
+            "agent_name": self.runtime.agent_name,
+            "env": self.runtime.env,
             # Logging
             "debug": self.logging.debug,
             "enable_span_logging": self.logging.enable_span_logging,
@@ -565,7 +578,7 @@ def load_config_from_env(flat: bool = False) -> Dict[str, Any]:
             raise ConfigError(f"Invalid metrics_sample_rate value: {value}. Must be a float between 0.0 and 1.0.")
     
     # Runtime section
-    for key in ["session_id", "user_id", "tenant_id", "project_id", "agent_id"]:
+    for key in ["session_id", "user_id", "tenant_id", "project_id", "agent_id", "agent_name", "env"]:
         value = get_env_value(key)
         if value is not None:
             env_config["runtime"][key] = value
@@ -755,6 +768,8 @@ def load_config_with_priority(
             "tenant_id": ("runtime", "tenant_id"),
             "project_id": ("runtime", "project_id"),
             "agent_id": ("runtime", "agent_id"),
+            "agent_name": ("runtime", "agent_name"),
+            "env": ("runtime", "env"),
             # Logging
             "debug": ("logging", "debug"),
             "enable_span_logging": ("logging", "enable_span_logging"),

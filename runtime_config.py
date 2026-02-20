@@ -13,6 +13,8 @@ _config = {
     "tenant_id": None,
     "project_id": None,
     "agent_id": None,
+    "agent_name": None,
+    "env": None,
     "debug": False,
     "attr_truncation_limit": 1000,
     "openai_agents": True,
@@ -90,6 +92,22 @@ def set_agent_id(value: Optional[str]) -> None:
 
 def get_agent_id() -> Optional[str]:
     return _config["agent_id"]
+
+
+def set_agent_name(value: Optional[str]) -> None:
+    _config["agent_name"] = value
+
+
+def get_agent_name() -> Optional[str]:
+    return _config["agent_name"]
+
+
+def set_env(value: Optional[str]) -> None:
+    _config["env"] = value
+
+
+def get_env() -> Optional[str]:
+    return _config["env"]
 
 
 def set_debug(value: bool) -> None:

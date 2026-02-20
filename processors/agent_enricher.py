@@ -43,10 +43,12 @@ def _load_agent_catalog(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
 class AgentEnrichmentProcessor(SpanProcessor):
     """
     Enrich spans with agent metadata (id/name/env/owner/team/org) and compute llm.cost.usd if missing.
-    Static metadata can come from:
-      - span attributes (preferred)
-      - environment variables (AGENT_DASHBOARD_AGENT_ID/NAME/ENV/OWNER/TEAM/ORG_ID/SUB_ORG_ID/DESCRIPTION)
-      - JSON config file pointed by AGENT_DASHBOARD_AGENT_CONFIG
+
+    Precedence (highest to lowest):
+      1. Span attributes (agent.id, agent.name, env) — span-level overrides
+      2. Default identity passed at init (from init()/start_tracing() or TRACCIA_*)
+      3. AGENT_DASHBOARD_* env vars (legacy)
+      4. Single-agent catalog from AGENT_DASHBOARD_AGENT_CONFIG
     """
 
     def __init__(
@@ -54,11 +56,15 @@ class AgentEnrichmentProcessor(SpanProcessor):
         *,
         agent_config_path: Optional[str] = None,
         default_agent_id: Optional[str] = None,
-        default_env: str = "production",
+        default_agent_name: Optional[str] = None,
+        default_env: Optional[str] = None,
+        legacy_default_env: str = "production",
     ) -> None:
-        self.default_agent_id = default_agent_id or os.getenv("AGENT_DASHBOARD_AGENT_ID")
-        self.default_env = os.getenv("AGENT_DASHBOARD_ENV") or default_env
-        self.default_name = os.getenv("AGENT_DASHBOARD_AGENT_NAME")
+        # Init-time identity (from init()/start_tracing() or TRACCIA_*) takes precedence over legacy env
+        self.default_agent_id = default_agent_id or os.getenv("TRACCIA_AGENT_ID") or os.getenv("AGENT_DASHBOARD_AGENT_ID")
+        self.default_agent_name = default_agent_name or os.getenv("TRACCIA_AGENT_NAME") or os.getenv("AGENT_DASHBOARD_AGENT_NAME")
+        self.default_env = default_env or os.getenv("TRACCIA_ENV") or os.getenv("AGENT_DASHBOARD_ENV") or legacy_default_env
+        self.default_name = self.default_agent_name  # alias for internal use
         self.default_type = os.getenv("AGENT_DASHBOARD_AGENT_TYPE")
         self.default_owner = os.getenv("AGENT_DASHBOARD_AGENT_OWNER")
         self.default_team = os.getenv("AGENT_DASHBOARD_AGENT_TEAM")
