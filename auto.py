@@ -34,6 +34,7 @@ from traccia.metrics.recorder import set_global_recorder
 
 _started = False
 _registered_shutdown = False
+_metrics_shutdown = False
 _active_processor: Optional[BatchSpanProcessor] = None
 _init_method: Optional[str] = None  # Track how SDK was initialized: "init" or "start_tracing"
 _auto_trace_context: Optional[Any] = None  # Context for auto-started trace
@@ -631,9 +632,29 @@ def start_tracing(
     return provider
 
 
+def _flush_and_shutdown_metrics(flush_timeout: Optional[float] = None) -> None:
+    """Flush and shutdown the global MeterProvider so token/metrics are exported before process exit. Idempotent."""
+    global _metrics_shutdown
+    if _metrics_shutdown:
+        return
+    try:
+        from opentelemetry import metrics as otel_metrics
+        mp = otel_metrics.get_meter_provider()
+        if mp is None:
+            return
+        timeout_ms = int((flush_timeout or 2.0) * 1000)
+        if hasattr(mp, "force_flush"):
+            mp.force_flush(timeout_millis=timeout_ms)
+        if hasattr(mp, "shutdown"):
+            mp.shutdown()
+        _metrics_shutdown = True
+    except Exception:
+        pass  # don't fail process shutdown
+
+
 def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     """Force flush and shutdown registered processors and provider."""
-    global _started, _init_method, _auto_trace_context
+    global _started, _init_method, _auto_trace_context, _metrics_shutdown
     
     # End auto-trace if active
     if _auto_trace_context:
@@ -647,8 +668,10 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
         finally:
             _active_processor.shutdown()
     provider.shutdown()
+    _flush_and_shutdown_metrics(flush_timeout)
     _started = False
     _init_method = None
+    _metrics_shutdown = True  # ensure flag set even if _flush_and_shutdown_metrics skipped
 
 
 def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanProcessor]) -> None:
@@ -657,12 +680,16 @@ def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanPr
         return
 
     def _cleanup():
+        # If stop_tracing() was already called (e.g. from app finally block), skip to avoid double shutdown
+        if not _started:
+            return
         try:
             if processor:
                 processor.force_flush()
                 processor.shutdown()
         finally:
             provider.shutdown()
+            _flush_and_shutdown_metrics(5.0)
 
     atexit.register(_cleanup)
     _registered_shutdown = True
