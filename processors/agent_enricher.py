@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from traccia.processors.cost_engine import compute_cost
 from traccia.tracer.provider import SpanProcessor
+from traccia import runtime_config
 
 
 def _load_agent_catalog(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -46,9 +47,10 @@ class AgentEnrichmentProcessor(SpanProcessor):
 
     Precedence (highest to lowest):
       1. Span attributes (agent.id, agent.name, env) — span-level overrides
-      2. Default identity passed at init (from init()/start_tracing() or TRACCIA_*)
-      3. AGENT_DASHBOARD_* env vars (legacy)
-      4. Single-agent catalog from AGENT_DASHBOARD_AGENT_CONFIG
+      2. Run-scoped identity (runtime_config run_identity context) or init-time global
+      3. Default identity passed at init (from init()/start_tracing() or TRACCIA_*)
+      4. AGENT_DASHBOARD_* env vars (legacy)
+      5. Single-agent catalog from AGENT_DASHBOARD_AGENT_CONFIG
     """
 
     def __init__(
@@ -84,10 +86,11 @@ class AgentEnrichmentProcessor(SpanProcessor):
 
     def on_end(self, span) -> None:
         attrs = span.attributes
-        # Resolve agent id
+        # Resolve agent id (span attrs > run-scoped/global runtime_config > init-time default)
         agent_id = (
             attrs.get("agent.id")
             or attrs.get("agent")
+            or runtime_config.get_agent_id()
             or self.default_agent_id
         )
         # Try using tracer instrumentation scope as a fallback id
@@ -114,7 +117,10 @@ class AgentEnrichmentProcessor(SpanProcessor):
                 attrs[key] = value
 
         attrs["agent.id"] = agent_id
-        set_if_missing("agent.name", meta.get("name") or self.default_name or agent_id)
+        set_if_missing(
+            "agent.name",
+            meta.get("name") or runtime_config.get_agent_name() or self.default_name or agent_id,
+        )
         set_if_missing("agent.type", meta.get("type") or self.default_type or "workflow")
         set_if_missing("agent.description", meta.get("description") or self.default_description or "")
         set_if_missing("owner", meta.get("owner") or self.default_owner)
@@ -122,9 +128,10 @@ class AgentEnrichmentProcessor(SpanProcessor):
         set_if_missing("org.id", meta.get("org_id") or self.default_org)
         set_if_missing("sub_org.id", meta.get("sub_org_id") or self.default_sub_org)
 
-        # Environment
-        set_if_missing("env", meta.get("env") or self.default_env)
-        set_if_missing("environment", meta.get("env") or self.default_env)
+        # Environment (run-scoped or init-time default)
+        env_val = meta.get("env") or runtime_config.get_env() or self.default_env
+        set_if_missing("env", env_val)
+        set_if_missing("environment", env_val)
 
         # Consumers (store as list)
         consumers = meta.get("consuming_teams")

@@ -1,6 +1,6 @@
 """Python SDK entrypoint for the agent tracing library."""
 
-from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace
+from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace, force_flush
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
 from traccia import metrics
@@ -82,6 +82,7 @@ __all__ = [
     "init",
     "trace",
     "end_auto_trace",
+    "force_flush",
     "span",
     "observe",
     "metrics",

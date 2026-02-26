@@ -277,6 +277,31 @@ init(
 )
 ```
 
+### Safe Parallel Runs in One Process
+
+If one **process** runs many agents concurrently (for example, an API server or orchestrator), use this pattern:
+
+- Call `init()` **once per process** (for example at startup), not per request.
+- Wrap each logical "run" in `runtime_config.run_identity(...)` to set agent id/name/env for that run.
+- Do **not** call `stop_tracing()` per request; use `force_flush()` to flush spans/metrics after a run without shutting down the provider.
+
+```python
+from traccia import init, span, force_flush, runtime_config
+
+init(service_name="multi-agent-service", auto_start_trace=False)
+
+def run_agent(agent_id: str, env: str, payload: dict):
+    # Scope identity to this run only
+    with runtime_config.run_identity(agent_id=agent_id, agent_name=agent_id, env=env):
+        with span("agent.run") as root:
+            root.set_attribute("agent.id", agent_id)
+            root.set_attribute("agent.run.mode", "api")
+            # ... your agent logic here ...
+
+    # Flush without tearing down the global provider
+    force_flush(5.0)
+```
+
 ---
 
 ## 🎯 Usage Guide

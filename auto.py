@@ -652,6 +652,28 @@ def _flush_and_shutdown_metrics(flush_timeout: Optional[float] = None) -> None:
         pass  # don't fail process shutdown
 
 
+def force_flush(flush_timeout: Optional[float] = None) -> None:
+    """
+    Flush pending spans (and optionally metrics) without shutting down the tracer provider.
+    Safe to call after each run when using init-once for parallel runs. Does not call
+    stop_tracing() or shutdown any provider.
+    """
+    try:
+        provider = _get_provider()
+        timeout = flush_timeout if flush_timeout is not None else 5.0
+        provider.force_flush(timeout=timeout)
+    except Exception:
+        pass
+    try:
+        from opentelemetry import metrics as otel_metrics
+        mp = otel_metrics.get_meter_provider()
+        if mp is not None and hasattr(mp, "force_flush"):
+            timeout_ms = int((flush_timeout or 5.0) * 1000)
+            mp.force_flush(timeout_millis=timeout_ms)
+    except Exception:
+        pass
+
+
 def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     """Force flush and shutdown registered processors and provider."""
     global _started, _init_method, _auto_trace_context, _metrics_shutdown

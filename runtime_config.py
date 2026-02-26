@@ -1,6 +1,18 @@
 """Runtime configuration state management."""
 
-from typing import Optional, List, Any
+from __future__ import annotations
+
+import contextvars
+from contextlib import contextmanager
+from typing import Any, List, Optional
+
+# Run-scoped identity (contextvars): when set, get_agent_id/get_agent_name/get_env return these
+# instead of the global _config. Used for parallel runs in one process without re-initing.
+_run_agent_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_agent_id", default=None)
+_run_agent_name: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_agent_name", default=None)
+_run_env: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_env", default=None)
+_run_tenant_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_tenant_id", default=None)
+_run_project_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_project_id", default=None)
 
 # Global runtime configuration state
 _config = {
@@ -75,6 +87,10 @@ def set_tenant_id(value: Optional[str]) -> None:
 
 
 def get_tenant_id() -> Optional[str]:
+    """Return run-scoped tenant_id if set, else global value."""
+    run_val = _run_tenant_id.get()
+    if run_val is not None:
+        return run_val
     return _config["tenant_id"]
 
 
@@ -83,6 +99,10 @@ def set_project_id(value: Optional[str]) -> None:
 
 
 def get_project_id() -> Optional[str]:
+    """Return run-scoped project_id if set, else global value."""
+    run_val = _run_project_id.get()
+    if run_val is not None:
+        return run_val
     return _config["project_id"]
 
 
@@ -91,6 +111,10 @@ def set_agent_id(value: Optional[str]) -> None:
 
 
 def get_agent_id() -> Optional[str]:
+    """Return run-scoped agent_id if set, else global (init-time) value."""
+    run_val = _run_agent_id.get()
+    if run_val is not None:
+        return run_val
     return _config["agent_id"]
 
 
@@ -99,6 +123,10 @@ def set_agent_name(value: Optional[str]) -> None:
 
 
 def get_agent_name() -> Optional[str]:
+    """Return run-scoped agent_name if set, else global (init-time) value."""
+    run_val = _run_agent_name.get()
+    if run_val is not None:
+        return run_val
     return _config["agent_name"]
 
 
@@ -107,6 +135,10 @@ def set_env(value: Optional[str]) -> None:
 
 
 def get_env() -> Optional[str]:
+    """Return run-scoped env if set, else global (init-time) value."""
+    run_val = _run_env.get()
+    if run_val is not None:
+        return run_val
     return _config["env"]
 
 
@@ -154,3 +186,40 @@ def set_config_value(key: str, value: Any) -> None:
 def get_config_value(key: str, default: Any = None) -> Any:
     """Get a runtime config value."""
     return _config.get(key, default)
+
+
+@contextmanager
+def run_identity(
+    *,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    env: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+):
+    """
+    Context manager to set run-scoped agent identity for the current context (e.g. one request).
+    Use this when one process runs multiple agents in parallel: init once at startup, then
+    wrap each run with run_identity(agent_id=..., agent_name=..., env=...) so spans get the
+    correct identity without calling init() again.
+    On exit, run-scoped values are cleared (global init-time values are unchanged).
+    """
+    resets: List[tuple] = []  # (ContextVar, token)
+    try:
+        if agent_id is not None:
+            resets.append((_run_agent_id, _run_agent_id.set(agent_id)))
+        if agent_name is not None:
+            resets.append((_run_agent_name, _run_agent_name.set(agent_name)))
+        if env is not None:
+            resets.append((_run_env, _run_env.set(env)))
+        if tenant_id is not None:
+            resets.append((_run_tenant_id, _run_tenant_id.set(tenant_id)))
+        if project_id is not None:
+            resets.append((_run_project_id, _run_project_id.set(project_id)))
+        yield
+    finally:
+        for var, token in reversed(resets):
+            try:
+                var.reset(token)
+            except ValueError:
+                pass
