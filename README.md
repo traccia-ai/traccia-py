@@ -153,6 +153,19 @@ init(crewai=False)  # Explicit parameter
 
 ## 📖 Configuration
 
+### Configuration Precedence
+
+Traccia merges configuration from multiple sources with the following priority (highest to lowest):
+
+1. **Explicit parameters** — `init(endpoint="...", agent_id="...")` or `start_tracing(...)`
+2. **Environment variables** — `TRACCIA_ENDPOINT`, `TRACCIA_AGENT_ID`, etc.
+3. **Config file** — `traccia.toml` (current directory) or `~/.traccia/config.toml`
+4. **Defaults** — Built-in SDK defaults
+
+**Example**: If you set `TRACCIA_ENDPOINT` in your environment *and* pass `endpoint=...` to `init()`, the explicit parameter wins.
+
+---
+
 ### Configuration File
 
 Create a `traccia.toml` file in your project root:
@@ -165,7 +178,7 @@ This creates a template config file:
 
 ```toml
 [tracing]
-# API key (optional - for future Traccia UI, not needed for OTLP backends)
+# API key — required for the Traccia platform, not needed for local OTLP backends
 api_key = ""
 
 # Endpoint URL for OTLP trace ingestion (default: Traccia platform)
@@ -177,6 +190,7 @@ auto_start_trace = true     # Auto-start root trace on init
 auto_trace_name = "root"    # Name for auto-started trace
 use_otlp = true             # Use OTLP exporter
 # service_name = "my-app"   # Optional service name
+# service_role has no env var — pass via init(service_role="orchestrator")
 
 [exporters]
 # Only enable ONE exporter at a time
@@ -190,6 +204,7 @@ enable_patching = true          # Auto-patch libraries (OpenAI, Anthropic, reque
 enable_token_counting = true    # Count tokens for LLM calls
 enable_costs = true             # Calculate costs
 openai_agents = true            # Auto-enable OpenAI Agents SDK integration
+crewai = true                   # Auto-enable CrewAI integration
 auto_instrument_tools = false   # Auto-instrument tool calls (experimental)
 max_tool_spans = 100            # Max tool spans to create
 max_span_depth = 10             # Max nested span depth
@@ -238,7 +253,7 @@ Traccia is fully OTLP-compatible and works with:
 - **Jaeger** - `http://jaeger:4318/v1/traces`
 - **Zipkin** - Configure via OTLP endpoint
 - **SigNoz** - Self-hosted observability platform
-- **Traccia Cloud** - Coming soon (will require API key)
+- **Traccia Platform** - `https://api.traccia.ai/v2/traces` (requires API key)
 
 ### Environment Variables
 
@@ -248,17 +263,17 @@ All config parameters can be set via environment variables with the `TRACCIA_` p
 
 **Exporters**: `TRACCIA_ENABLE_CONSOLE`, `TRACCIA_ENABLE_FILE`, `TRACCIA_FILE_PATH`, `TRACCIA_RESET_TRACE_FILE`
 
-**Instrumentation**: `TRACCIA_ENABLE_PATCHING`, `TRACCIA_ENABLE_TOKEN_COUNTING`, `TRACCIA_ENABLE_COSTS`, `TRACCIA_AUTO_INSTRUMENT_TOOLS`, `TRACCIA_MAX_TOOL_SPANS`, `TRACCIA_MAX_SPAN_DEPTH`
+**Instrumentation**: `TRACCIA_ENABLE_PATCHING`, `TRACCIA_ENABLE_TOKEN_COUNTING`, `TRACCIA_ENABLE_COSTS`, `TRACCIA_AUTO_INSTRUMENT_TOOLS`, `TRACCIA_MAX_TOOL_SPANS`, `TRACCIA_MAX_SPAN_DEPTH`, `TRACCIA_OPENAI_AGENTS`, `TRACCIA_CREWAI`
 
 **Rate Limiting**: `TRACCIA_MAX_SPANS_PER_SECOND`, `TRACCIA_MAX_QUEUE_SIZE`, `TRACCIA_MAX_BLOCK_MS`, `TRACCIA_MAX_EXPORT_BATCH_SIZE`, `TRACCIA_SCHEDULE_DELAY_MILLIS`
 
 **Runtime**: `TRACCIA_SESSION_ID`, `TRACCIA_USER_ID`, `TRACCIA_TENANT_ID`, `TRACCIA_PROJECT_ID`, `TRACCIA_AGENT_ID`, `TRACCIA_AGENT_NAME`, `TRACCIA_ENV`
 
+Legacy alias: `TRACCIA_PROJECT` (maps to `project_id`)
+
 **Logging**: `TRACCIA_DEBUG`, `TRACCIA_ENABLE_SPAN_LOGGING`
 
 **Advanced**: `TRACCIA_ATTR_TRUNCATION_LIMIT`
-
-**Priority**: Explicit parameters > Environment variables > Config file > Defaults
 
 ### Programmatic Configuration
 
@@ -276,6 +291,26 @@ init(
     env="production",
 )
 ```
+
+### Multi-Agent Orchestrator Services
+
+For services that orchestrate many logical agents in one process, set a service role and scope per-run identity:
+
+```python
+from traccia import init, runtime_config
+
+init(
+    service_name="my-multi-agent-api",
+    service_role="orchestrator",
+    auto_start_trace=False,
+)
+
+with runtime_config.run_identity(agent_id="billing-agent", agent_name="Billing Agent", env="production"):
+    # run one logical agent task
+    ...
+```
+
+This prevents the host service from being registered as a synthetic agent in the Traccia platform.
 
 ### Safe Parallel Runs in One Process
 
@@ -643,25 +678,63 @@ init(debug=True)
 
 #### `init(**kwargs) -> TracerProvider`
 
-Initialize the Traccia SDK.
+Initialize the Traccia SDK. All parameters are optional; configuration is merged from `traccia.toml` → env vars → explicit parameters (highest wins).
 
 **Parameters**:
-- `endpoint` (str, optional): OTLP endpoint URL (default: `config.DEFAULT_OTLP_TRACE_ENDPOINT` — Traccia platform)
-- `api_key` (str, optional): API key (optional, for future Traccia UI)
-- `sample_rate` (float, optional): Sampling rate (0.0-1.0)
-- `auto_start_trace` (bool, optional): Auto-start root trace
-- `config_file` (str, optional): Path to config file
-- `use_otlp` (bool, optional): Use OTLP exporter
-- `enable_console` (bool, optional): Enable console exporter
-- `enable_file` (bool, optional): Enable file exporter
-- `enable_patching` (bool, optional): Auto-patch libraries
-- `enable_token_counting` (bool, optional): Count tokens
-- `enable_costs` (bool, optional): Calculate costs
-- `enable_metrics` (bool, optional): Enable OTEL metrics (default: True)
-- `metrics_endpoint` (str, optional): Metrics endpoint
-- `metrics_sample_rate` (float, optional): Metrics sampling (default: 1.0)
-- `max_spans_per_second` (float, optional): Rate limit
-- `**kwargs`: Any other config parameter
+
+*Tracing*
+- `endpoint` (str): OTLP endpoint URL (default: `https://api.traccia.ai/v2/traces`)
+- `api_key` (str): API key for the Traccia platform
+- `sample_rate` (float): Sampling rate 0.0–1.0 (default: 1.0)
+- `auto_start_trace` (bool): Auto-start a root trace on init (default: True)
+- `auto_trace_name` (str): Name for the auto-started trace (default: `"root"`)
+- `use_otlp` (bool): Use OTLP exporter (default: True)
+- `service_name` (str): Service name (auto-detected if not set)
+- `service_role` (str): `"orchestrator"` to prevent this service being registered as an agent
+- `config_file` (str): Path to a custom `traccia.toml`
+
+*Exporters*
+- `enable_console_exporter` (bool): Print spans to stdout (default: False)
+- `enable_file_exporter` (bool): Write spans to file (default: False)
+- `file_exporter_path` (str): Path for file exporter (default: `"traces.jsonl"`)
+- `reset_trace_file` (bool): Clear file on init (default: False)
+
+*Instrumentation*
+- `enable_patching` (bool): Auto-patch OpenAI, Anthropic, requests (default: True)
+- `enable_token_counting` (bool): Count tokens (default: True)
+- `enable_costs` (bool): Calculate costs (default: True)
+- `openai_agents` (bool): Auto-enable OpenAI Agents SDK integration (default: True)
+- `crewai` (bool): Auto-enable CrewAI integration (default: True)
+- `auto_instrument_tools` (bool): Experimental tool auto-instrumentation (default: False)
+- `max_tool_spans` (int): Max tool spans per trace (default: 100)
+- `max_span_depth` (int): Max nested span depth (default: 10)
+
+*Agent identity (single-agent services)*
+- `agent_id` (str): Logical agent identifier
+- `agent_name` (str): Human-readable agent name
+- `env` (str): Deployment environment, e.g. `"production"`, `"staging"`
+
+*Runtime metadata*
+- `session_id` (str): Session identifier
+- `user_id` (str): User identifier
+- `tenant_id` (str): Tenant / org identifier
+- `project_id` (str): Project identifier
+
+*Metrics*
+- `enable_metrics` (bool): Emit OTEL metrics (default: True)
+- `metrics_endpoint` (str): Metrics endpoint (derived from tracing endpoint if not set)
+- `metrics_sample_rate` (float): Metrics sampling rate (default: 1.0)
+
+*Rate limiting*
+- `max_spans_per_second` (float): Rate limit spans/sec (default: None = unlimited)
+- `max_block_ms` (int): Max ms to block before dropping a span (default: 100)
+- `max_queue_size` (int): Max buffered spans (default: 5000)
+- `max_export_batch_size` (int): Spans per export batch (default: 512)
+- `schedule_delay_millis` (int): Batch export interval ms (default: 5000)
+
+*Misc*
+- `debug` (bool): Enable debug logging (default: False)
+- `attr_truncation_limit` (int): Max attribute value length (default: None)
 
 **Returns**: TracerProvider instance
 

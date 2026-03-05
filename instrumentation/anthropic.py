@@ -35,13 +35,29 @@ def _record_llm_metrics(
         if not recorder:
             return
         
-        # Build attributes
+        # Build attributes — always include per-run agent identity so the ingestion
+        # metrics converter can attribute data points to the correct agent.
         attributes = {
             "gen_ai.system": "anthropic",
         }
         if model:
             attributes["gen_ai.request.model"] = model
-        
+
+        try:
+            from traccia import runtime_config as _rc
+            _aid = _rc.get_agent_id()
+            _aname = _rc.get_agent_name()
+            _env = _rc.get_env()
+            if _aid:
+                attributes["agent.id"] = _aid
+                attributes["agent_id"] = _aid
+            if _aname:
+                attributes["agent.name"] = _aname
+            if _env:
+                attributes["environment"] = _env
+        except Exception:
+            pass
+
         # Record token usage
         if input_tokens is not None or output_tokens is not None:
             recorder.record_token_usage(

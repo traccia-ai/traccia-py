@@ -16,7 +16,7 @@ def _record_agent_metrics(
     agent_id: Optional[str],
     agent_name: Optional[str],
     execution_time: Optional[float],
-    is_run: bool = False
+    is_run: bool = False,
 ):
     """Record agent metrics if metrics are enabled."""
     try:
@@ -25,13 +25,28 @@ def _record_agent_metrics(
         if not recorder:
             return
         
-        # Build attributes
+        # Build attributes — prefer run-scoped identity from runtime_config.
         attributes = {}
-        if agent_id:
+        try:
+            from traccia import runtime_config as _rc
+            _aid = _rc.get_agent_id()
+            _aname = _rc.get_agent_name()
+            _env = _rc.get_env()
+            if _aid:
+                attributes["agent.id"] = _aid
+                attributes["agent_id"] = _aid
+            if _aname:
+                attributes["agent.name"] = _aname
+            if _env:
+                attributes["environment"] = _env
+        except Exception:
+            pass
+        # Fall back to framework-provided values if runtime_config not set
+        if not attributes.get("agent.id") and agent_id:
             attributes["gen_ai.agent.id"] = agent_id
-        if agent_name:
+        if not attributes.get("agent.name") and agent_name:
             attributes["gen_ai.agent.name"] = agent_name
-        
+
         # Record agent run (for crew kickoff)
         if is_run:
             recorder.record_agent_run(attributes=attributes)
@@ -42,6 +57,38 @@ def _record_agent_metrics(
     except Exception:
         # Silently fail if metrics recording fails
         pass
+
+
+def _attach_run_identity(attributes: dict[str, Any]) -> dict[str, Any]:
+    """
+    Attach current Traccia run identity (agent.id/name/env) to CrewAI span attributes when available.
+
+    This ensures CrewAI spans can always be attributed to the correct logical agent
+    (e.g. portal sub-agent) even when they are created inside framework code.
+    """
+    try:
+        from traccia import runtime_config
+    except Exception:
+        return attributes
+
+    try:
+        agent_id = runtime_config.get_agent_id()
+        agent_name = runtime_config.get_agent_name()
+        env = runtime_config.get_env()
+    except Exception:
+        return attributes
+
+    if agent_id and "agent.id" not in attributes:
+        attributes["agent.id"] = agent_id
+    if agent_name and "agent.name" not in attributes:
+        attributes["agent.name"] = agent_name
+    if env:
+        if "env" not in attributes:
+            attributes["env"] = env
+        if "environment" not in attributes:
+            attributes["environment"] = env
+
+    return attributes
 
 
 def instrument_crewai() -> bool:
@@ -144,6 +191,7 @@ def _create_crew_wrapper(original_method: Callable, span_name: str) -> Callable:
         
         # Extract crew attributes
         attributes = _get_crew_attributes(self)
+        attributes = _attach_run_identity(attributes)
         
         # Start span with OpenTelemetry context propagation
         start_time = time.time()
@@ -166,7 +214,7 @@ def _create_crew_wrapper(original_method: Callable, span_name: str) -> Callable:
                     agent_id=str(crew_id) if crew_id else None,
                     agent_name=crew_name,
                     execution_time=execution_time,
-                    is_run=True  # Crew kickoff is an agent run
+                    is_run=True,  # Crew kickoff is an agent run
                 )
                 
                 return result
@@ -196,6 +244,7 @@ def _create_task_wrapper(original_method: Callable, span_name: str) -> Callable:
         
         # Extract task attributes
         attributes = _get_task_attributes(self)
+        attributes = _attach_run_identity(attributes)
         
         # Use task description or name for span name
         task_name = getattr(self, "name", None) or getattr(self, "description", "task")
@@ -244,6 +293,7 @@ def _create_agent_wrapper(original_method: Callable, span_name: str) -> Callable
         
         # Extract agent attributes
         attributes = _get_agent_attributes(self)
+        attributes = _attach_run_identity(attributes)
         
         # Use agent role for span name
         agent_role = getattr(self, "role", "agent")
@@ -270,7 +320,7 @@ def _create_agent_wrapper(original_method: Callable, span_name: str) -> Callable
                     agent_id=str(agent_id) if agent_id else None,
                     agent_name=agent_role,
                     execution_time=execution_time,
-                    is_run=False  # This is a turn, not a run
+                    is_run=False,  # This is a turn, not a run
                 )
                 
                 return result
@@ -311,6 +361,8 @@ def _create_llm_wrapper(original_method: Callable, span_name: str) -> Callable:
         # Add model provider if available
         if hasattr(self, "model_name"):
             attributes["crewai.llm.model_name"] = str(self.model_name)
+
+        attributes = _attach_run_identity(attributes)
         
         # Start span - this will automatically nest under agent span if one exists
         with tracer.start_as_current_span(
@@ -356,6 +408,20 @@ def _create_llm_wrapper(original_method: Callable, span_name: str) -> Callable:
                                     recorder = get_metrics_recorder()
                                     if recorder:
                                         attributes_metrics = {"gen_ai.system": "crewai", "gen_ai.request.model": str(model)}
+                                        try:
+                                            from traccia import runtime_config as _rc
+                                            _aid = _rc.get_agent_id()
+                                            _aname = _rc.get_agent_name()
+                                            _env = _rc.get_env()
+                                            if _aid:
+                                                attributes_metrics["agent.id"] = _aid
+                                                attributes_metrics["agent_id"] = _aid
+                                            if _aname:
+                                                attributes_metrics["agent.name"] = _aname
+                                            if _env:
+                                                attributes_metrics["environment"] = _env
+                                        except Exception:
+                                            pass
                                         recorder.record_token_usage(
                                             prompt_tokens=prompt_tokens,
                                             completion_tokens=completion_tokens,
