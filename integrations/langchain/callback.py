@@ -347,7 +347,22 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             attributes = {"gen_ai.system": vendor}
             if model:
                 attributes["gen_ai.request.model"] = model
-            
+
+            try:
+                from traccia import runtime_config as _rc
+                _aid = _rc.get_agent_id()
+                _aname = _rc.get_agent_name()
+                _env = _rc.get_env()
+                if _aid:
+                    attributes["agent.id"] = _aid
+                    attributes["agent_id"] = _aid
+                if _aname:
+                    attributes["agent.name"] = _aname
+                if _env:
+                    attributes["environment"] = _env
+            except Exception:
+                pass
+
             # Duration
             t0 = self._span_start_times.get(run_id)
             if t0 is not None:

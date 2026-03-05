@@ -344,6 +344,7 @@ def start_tracing(
     enable_metrics: bool = True,  # Enable metrics
     metrics_endpoint: Optional[str] = None,  # Metrics endpoint
     metrics_sample_rate: float = 1.0,  # Metrics sampling rate
+    service_role: Optional[str] = None,  # Optional logical role (e.g. orchestrator)
 ) -> TracerProvider:
     """
     Initialize global tracing:
@@ -453,6 +454,10 @@ def start_tracing(
     if runtime_config.get_env():
         resource_attrs["environment"] = runtime_config.get_env()
         resource_attrs["env"] = runtime_config.get_env()
+    # Logical service role (e.g. orchestrator / multi-agent portal) can be provided
+    # via config/env/kwargs and is emitted as a resource attribute for ingestion.
+    if service_role:
+        resource_attrs["traccia.service_role"] = service_role
     if runtime_config.get_debug():
         resource_attrs["trace.debug"] = True
     
@@ -599,6 +604,7 @@ def start_tracing(
             agent_id=runtime_config.get_agent_id(),
             agent_name=runtime_config.get_agent_name(),
             env=runtime_config.get_env(),
+            service_role=service_role,
         )
 
     # Auto-instrument in-repo functions/tools if enabled
@@ -854,6 +860,7 @@ def _initialize_metrics(
     agent_id: Optional[str] = None,
     agent_name: Optional[str] = None,
     env: Optional[str] = None,
+    service_role: Optional[str] = None,
 ) -> None:
     """Initialize OpenTelemetry MeterProvider and metrics."""
     try:
@@ -885,7 +892,9 @@ def _initialize_metrics(
             # Use default endpoint
             metrics_endpoint = DEFAULT_OTLP_TRACE_ENDPOINT.replace("/v2/traces", "/v2/metrics")
 
-    # Create resource with service.name and agent identity (align with traces)
+    # Create resource with service.name and agent identity (align with traces).
+    # Include traccia.service_role so that the ingestion metrics converter
+    # can avoid falling back to service.name as agent_id for orchestrators.
     resource_attrs = {"service.name": service_name}
     if agent_id:
         resource_attrs["agent.id"] = agent_id
@@ -894,6 +903,8 @@ def _initialize_metrics(
     if env:
         resource_attrs["environment"] = env
         resource_attrs["env"] = env
+    if service_role:
+        resource_attrs["traccia.service_role"] = service_role
     resource = Resource(attributes=resource_attrs)
 
     # Create OTLP metric exporter with API key

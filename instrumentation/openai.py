@@ -36,12 +36,30 @@ def _record_llm_metrics(
         if not recorder:
             return
         
-        # Build attributes
-        attributes = {
+        # Build attributes — always include the per-run agent identity so the
+        # ingestion metrics converter can attribute the data point to the correct
+        # agent rather than falling back to the resource-level service.name.
+        attributes: Dict[str, Any] = {
             "gen_ai.system": "openai",
         }
         if model:
             attributes["gen_ai.request.model"] = model
+        
+        # Attach per-run agent identity from runtime_config (set by run_identity context manager).
+        try:
+            from traccia import runtime_config as _rc
+            _aid = _rc.get_agent_id()
+            _aname = _rc.get_agent_name()
+            _env = _rc.get_env()
+            if _aid:
+                attributes["agent.id"] = _aid
+                attributes["agent_id"] = _aid
+            if _aname:
+                attributes["agent.name"] = _aname
+            if _env:
+                attributes["environment"] = _env
+        except Exception:
+            pass
         
         # Record token usage
         if prompt_tokens is not None or completion_tokens is not None:

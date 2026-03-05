@@ -145,13 +145,29 @@ class TracciaAgentsTracingProcessor:
             if not recorder:
                 return
             
-            # Build attributes
+            # Build attributes — prefer run-scoped identity from runtime_config so metrics
+            # are attributed to the correct logical agent (not the sub-agent role name).
             attributes = {}
-            if agent_id:
+            try:
+                from traccia import runtime_config as _rc
+                _aid = _rc.get_agent_id()
+                _aname = _rc.get_agent_name()
+                _env = _rc.get_env()
+                if _aid:
+                    attributes["agent.id"] = _aid
+                    attributes["agent_id"] = _aid
+                if _aname:
+                    attributes["agent.name"] = _aname
+                if _env:
+                    attributes["environment"] = _env
+            except Exception:
+                pass
+            # Fall back to span-derived agent identity if runtime_config not set
+            if not attributes.get("agent.id") and agent_id:
                 attributes["gen_ai.agent.id"] = str(agent_id)
-            if agent_name:
+            if not attributes.get("agent.name") and agent_name:
                 attributes["gen_ai.agent.name"] = str(agent_name)
-            
+
             # Record agent run
             if is_run:
                 recorder.record_agent_run(attributes=attributes)
@@ -184,7 +200,21 @@ class TracciaAgentsTracingProcessor:
                 return
             
             attributes = {"gen_ai.system": "openai.agents", "gen_ai.request.model": str(model)}
-            
+            try:
+                from traccia import runtime_config as _rc
+                _aid = _rc.get_agent_id()
+                _aname = _rc.get_agent_name()
+                _env = _rc.get_env()
+                if _aid:
+                    attributes["agent.id"] = _aid
+                    attributes["agent_id"] = _aid
+                if _aname:
+                    attributes["agent.name"] = _aname
+                if _env:
+                    attributes["environment"] = _env
+            except Exception:
+                pass
+
             # Duration
             if start_time is not None:
                 duration = time.time() - start_time
