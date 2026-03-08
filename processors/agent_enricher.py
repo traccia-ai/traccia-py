@@ -114,9 +114,9 @@ class AgentEnrichmentProcessor(SpanProcessor):
             if value is None:
                 return
             if key not in attrs or attrs.get(key) in (None, ""):
-                attrs[key] = value
+                span.set_attribute(key, value)
 
-        attrs["agent.id"] = agent_id
+        span.set_attribute("agent.id", agent_id)
         set_if_missing(
             "agent.name",
             meta.get("name") or runtime_config.get_agent_name() or self.default_name or agent_id,
@@ -136,7 +136,7 @@ class AgentEnrichmentProcessor(SpanProcessor):
         # Consumers (store as list)
         consumers = meta.get("consuming_teams")
         if consumers and "agent.consuming_teams" not in attrs:
-            attrs["agent.consuming_teams"] = consumers
+            span.set_attribute("agent.consuming_teams", consumers)
 
         # Cost: fill llm.cost.usd if we have tokens + model
         if "llm.cost.usd" not in attrs:
@@ -151,7 +151,7 @@ class AgentEnrichmentProcessor(SpanProcessor):
                         completion_tokens=int(completion_tokens or 0),
                     )
                     if cost is not None:
-                        attrs["llm.cost.usd"] = cost
+                        span.set_attribute("llm.cost.usd", cost)
                 except Exception:
                     pass
 
@@ -163,7 +163,7 @@ class AgentEnrichmentProcessor(SpanProcessor):
             elif attrs.get("tool.name") or attrs.get("tool") or attrs.get("http.url"):
                 span_type = "TOOL"
             if span_type:
-                attrs["span.type"] = span_type
+                span.set_attribute("span.type", span_type)
 
     def shutdown(self) -> None:
         return
