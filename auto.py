@@ -865,8 +865,11 @@ def _initialize_metrics(
     """Initialize OpenTelemetry MeterProvider and metrics."""
     try:
         from opentelemetry import metrics
-        from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.metrics import MeterProvider, Histogram
+        from opentelemetry.sdk.metrics.export import (
+            PeriodicExportingMetricReader,
+            AggregationTemporality,
+        )
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
         from opentelemetry.sdk.resources import Resource
     except ImportError:
@@ -912,9 +915,16 @@ def _initialize_metrics(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # Use DELTA temporality for histograms so that each export represents
+    # a per-interval delta instead of an ever-growing cumulative sum. This
+    # keeps downstream aggregations (e.g. agent_metric_totals) linear in the
+    # actual number of operations instead of exploding over time.
     metric_exporter = OTLPMetricExporter(
         endpoint=metrics_endpoint,
-        headers=headers
+        headers=headers,
+        preferred_temporality={
+            Histogram: AggregationTemporality.DELTA,
+        },
     )
 
     # Create metric reader with periodic export
