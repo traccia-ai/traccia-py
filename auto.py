@@ -341,6 +341,7 @@ def start_tracing(
     max_block_ms: int = 100,  # Rate limiting block time
     openai_agents: Optional[bool] = None,  # Auto-install OpenAI Agents integration
     crewai: Optional[bool] = None,  # Auto-install CrewAI integration
+    guardrail_heuristics: Optional[bool] = None,  # Tier C heuristic guardrail detection (default True)
     enable_metrics: bool = True,  # Enable metrics
     metrics_endpoint: Optional[str] = None,  # Metrics endpoint
     metrics_sample_rate: float = 1.0,  # Metrics sampling rate
@@ -540,6 +541,29 @@ def start_tracing(
             default_env=runtime_config.get_env(),
         )
     )
+    # Guardrail detection: runs automatically for every trace, writes findings
+    # onto span attributes so they flow through all exporters without any
+    # application-level code changes.
+    _gr_heur = guardrail_heuristics
+    if _gr_heur is None:
+        _gv = sdk_config.get_env_value("guardrail_heuristics")
+        if _gv is not None:
+            _gr_heur = _gv.lower() in ("true", "1", "yes")
+    if _gr_heur is None:
+        _gr_heur = True
+    try:
+        from traccia.processors.guardrail_detector import GuardrailDetectorProcessor
+
+        provider.add_span_processor(
+            GuardrailDetectorProcessor(heuristics_enabled=_gr_heur)
+        )
+    except Exception as _gr_exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not register GuardrailDetectorProcessor: %s",
+            _gr_exc,
+        )
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
     # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor

@@ -15,7 +15,9 @@ Traccia is a lightweight, high-performance Python SDK for observability and trac
 - **⚡ Zero-Config Start**: Simple `init()` call with automatic config discovery
 - **🎯 Decorator-Based**: Trace any function with `@observe` decorator
 - **🔧 Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console, or File
-- **🛡️ Production-Ready**: Rate limiting, error handling, config validation, robust flushing
+- **🛡️ Production-Ready**: Rate limiting, error handling, config validation, robust 
+flushing
+- **🛡️ Guardrail Detection**: Passive, zero-overhead detection of guardrails in traces — explicit, provider-native, and heuristic
 - **📝 Type-Safe**: Full Pydantic validation for configuration
 - **🚀 High Performance**: Efficient batching, async support, minimal overhead
 - **🔐 Secure**: No secrets in logs, configurable data truncation
@@ -151,6 +153,116 @@ init(crewai=False)  # Explicit parameter
 
 ---
 
+## 🛡️ Guardrail Detection
+
+Traccia includes a passive guardrail detection engine that runs as a span processor — no runtime enforcement, no changes required to existing agent code. It inspects every span as it ends, classifies guardrail signals into structured findings, and writes results back onto spans so they appear in any configured exporter.
+
+### How it works
+
+Detection is automatic once `traccia.init()` is called. The processor runs three tiers against every span's attributes:
+
+| Tier | Source | Confidence | How |
+|------|--------|------------|-----|
+| A — Explicit | `explicit` | `high` | `@observe(as_type="guardrail")` or `guardrail_span()` |
+| B — Provider-native | `provider_native` | `high`/`medium` | LLM finish reason, stop reason, safety ratings |
+| C — Heuristic | `heuristic` | always `low` | Denial keywords in tool error messages |
+
+At the end of each trace (when the root span ends), the processor evaluates which guardrail categories should exist given the agent's observed capabilities (LLM calls, tool use, user-provided text) and reports which are missing.
+
+### Annotating guardrails explicitly (Tier A)
+
+**Option 1: `guardrail_span` context manager** — recommended for inline checks
+
+```python
+from traccia.guardrails import guardrail_span
+
+with guardrail_span("pii_check", category="pii", enforcement_mode="warn") as span:
+    result = run_pii_check(user_input)
+    span.set_attribute("guardrail.triggered", result.found_pii)
+```
+
+**Option 2: `@observe(as_type="guardrail")` decorator** — for function-level guardrails
+
+If your guardrail function returns a `bool`, `guardrail.triggered` is set automatically:
+
+```python
+from traccia import observe
+
+@observe(
+    as_type="guardrail",
+    attributes={
+        "guardrail.name": "prompt_injection_check",
+        "guardrail.category": "prompt_injection",
+        "guardrail.enforcement_mode": "block",
+    }
+)
+def check_injection(text: str) -> bool:
+    return any(kw in text.lower() for kw in INJECTION_KEYWORDS)
+    # True → triggered (blocked), False → not triggered
+```
+
+For non-bool returns, set `guardrail.triggered` manually on the current span.
+
+### Suppressing false positive missing-guardrail warnings
+
+Batch pipelines or internal-only agents often get flagged for `prompt_injection` / `input_validation` because they make LLM calls with `llm.prompt`. Suppress specific categories for a run:
+
+```python
+from traccia.guardrails import guardrail_span
+
+# Convenience: suppress_missing on guardrail_span
+with guardrail_span("root", category="unknown", suppress_missing=["prompt_injection", "input_validation"]):
+    run_batch_pipeline()
+
+# Or directly on any span
+from traccia.guardrails import ATTR_GUARDRAIL_SUPPRESS_MISSING
+span.set_attribute(ATTR_GUARDRAIL_SUPPRESS_MISSING, ["prompt_injection"])
+```
+
+### What appears in traces
+
+**Per span** (when a guardrail signal is found):
+- `guardrail.finding.count` — number of findings on this span
+- `guardrail.findings` — JSON array of `GuardrailFinding` objects
+
+**On the root span** (aggregated summary of the entire run):
+- `guardrail.summary` — full `GuardrailSummary` JSON
+- `guardrail.summary.coverage_confidence` — `"high"`, `"medium"`, or `"low"`
+- `guardrail.summary.missing_count` — number of expected-but-missing guardrail categories
+- `guardrail.summary.detected_categories` — list of detected category strings
+
+### Provider-native detection (Tier B, automatic)
+
+These signals are detected automatically from LLM span attributes — no annotation required:
+
+| Provider | Signal | Attribute |
+|----------|--------|-----------|
+| OpenAI | `finish_reason = "content_filter"` | `llm.finish_reason` |
+| Azure OpenAI | `finish_reason = "content_filtered"` | `llm.finish_reason` |
+| Google GenAI | `finish_reason = "SAFETY"` | `llm.finish_reason` |
+| Anthropic | `stop_reason = "content_filter"` | `llm.stop_reason` |
+| Anthropic | Policy violation error message | `error.message` + `llm.vendor=anthropic` |
+| Google/LangChain | `"blocked": true` or `"probability": "HIGH"` in safety ratings | `llm.safety_ratings` |
+
+### Disabling Tier C (heuristic) detection
+
+Tier A/B stay on. Turn off tool-error keyword heuristics if you do not want Tier C at all:
+
+```python
+init(guardrail_heuristics=False)
+```
+
+Or `TRACCIA_GUARDRAIL_HEURISTICS=false`, or in `traccia.toml`: `[instrumentation]` → `guardrail_heuristics = false`.
+
+### Hard limits — what cannot be captured
+
+- Guardrails running outside the traced process (API gateways, proxies, external validators) are invisible unless they write span attributes.
+- A guardrail that exists but never fires cannot be distinguished from a missing guardrail. Only explicit annotation proves presence.
+- Prompt injection detection requires an explicit span — the model's output alone cannot reliably indicate whether a check ran.
+- Capability inference (`handles_user_text`) is inferred from `llm.prompt` being present; batch pipelines and user-facing agents look the same. Use suppression to opt out.
+
+---
+
 ## 📖 Configuration
 
 ### Configuration Precedence
@@ -205,6 +317,7 @@ enable_token_counting = true    # Count tokens for LLM calls
 enable_costs = true             # Calculate costs
 openai_agents = true            # Auto-enable OpenAI Agents SDK integration
 crewai = true                   # Auto-enable CrewAI integration
+guardrail_heuristics = true     # Tier C heuristic guardrail detection (tool error keywords)
 auto_instrument_tools = false   # Auto-instrument tool calls (experimental)
 max_tool_spans = 100            # Max tool spans to create
 max_span_depth = 10             # Max nested span depth
@@ -263,7 +376,7 @@ All config parameters can be set via environment variables with the `TRACCIA_` p
 
 **Exporters**: `TRACCIA_ENABLE_CONSOLE`, `TRACCIA_ENABLE_FILE`, `TRACCIA_FILE_PATH`, `TRACCIA_RESET_TRACE_FILE`
 
-**Instrumentation**: `TRACCIA_ENABLE_PATCHING`, `TRACCIA_ENABLE_TOKEN_COUNTING`, `TRACCIA_ENABLE_COSTS`, `TRACCIA_AUTO_INSTRUMENT_TOOLS`, `TRACCIA_MAX_TOOL_SPANS`, `TRACCIA_MAX_SPAN_DEPTH`, `TRACCIA_OPENAI_AGENTS`, `TRACCIA_CREWAI`
+**Instrumentation**: `TRACCIA_ENABLE_PATCHING`, `TRACCIA_ENABLE_TOKEN_COUNTING`, `TRACCIA_ENABLE_COSTS`, `TRACCIA_AUTO_INSTRUMENT_TOOLS`, `TRACCIA_MAX_TOOL_SPANS`, `TRACCIA_MAX_SPAN_DEPTH`, `TRACCIA_OPENAI_AGENTS`, `TRACCIA_CREWAI`, `TRACCIA_GUARDRAIL_HEURISTICS`
 
 **Rate Limiting**: `TRACCIA_MAX_SPANS_PER_SECOND`, `TRACCIA_MAX_QUEUE_SIZE`, `TRACCIA_MAX_BLOCK_MS`, `TRACCIA_MAX_EXPORT_BATCH_SIZE`, `TRACCIA_SCHEDULE_DELAY_MILLIS`
 
@@ -382,7 +495,7 @@ def fetch_large_dataset():
 **Available Parameters**:
 - `name` (str, optional): Custom span name (defaults to function name)
 - `attributes` (dict, optional): Initial span attributes
-- `as_type` (str): Span type - `"span"`, `"llm"`, or `"tool"`
+- `as_type` (str): Span type - `"span"`, `"llm"`, `"tool"`, or `"guardrail"`
 - `skip_args` (list, optional): List of argument names to skip capturing
 - `skip_result` (bool): Skip capturing the return value
 
@@ -705,6 +818,7 @@ Initialize the Traccia SDK. All parameters are optional; configuration is merged
 - `enable_costs` (bool): Calculate costs (default: True)
 - `openai_agents` (bool): Auto-enable OpenAI Agents SDK integration (default: True)
 - `crewai` (bool): Auto-enable CrewAI integration (default: True)
+- `guardrail_heuristics` (bool): Enable Tier C heuristic guardrail detection (default: True)
 - `auto_instrument_tools` (bool): Experimental tool auto-instrumentation (default: False)
 - `max_tool_spans` (int): Max tool spans per trace (default: 100)
 - `max_span_depth` (int): Max nested span depth (default: 10)
@@ -774,7 +888,7 @@ Decorate a function to create spans automatically.
 - `name` (str, optional): Span name (default: function name)
 - `attributes` (dict, optional): Initial attributes
 - `tags` (list[str], optional): User-defined identifiers for the observed method
-- `as_type` (str): Span type (`"span"`, `"llm"`, `"tool"`)
+- `as_type` (str): Span type (`"span"`, `"llm"`, `"tool"`, `"guardrail"`)
 - `skip_args` (list, optional): Arguments to skip capturing
 - `skip_result` (bool): Skip capturing return value
 

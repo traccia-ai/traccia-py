@@ -315,7 +315,7 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             if total is not None:
                 span.set_attribute("llm.usage.total_tokens", int(total))
 
-        # Extract completion (last generation text or message content)
+        # Extract completion, finish_reason, and safety metadata
         if response.generations and len(response.generations) > 0:
             last_gen = response.generations[-1]
             if last_gen and len(last_gen) > 0:
@@ -325,6 +325,27 @@ class TracciaCallbackHandler(BaseCallbackHandler):
                 )
                 if completion:
                     span.set_attribute("llm.completion", str(completion))
+
+                # Extract finish_reason from generation_info or response_metadata
+                gen_info = getattr(chunk, "generation_info", None) or {}
+                if isinstance(gen_info, dict):
+                    fr = gen_info.get("finish_reason")
+                    if fr:
+                        span.set_attribute("llm.finish_reason", str(fr))
+                msg = getattr(chunk, "message", None)
+                if msg is not None:
+                    resp_meta = getattr(msg, "response_metadata", None) or {}
+                    if isinstance(resp_meta, dict):
+                        fr = resp_meta.get("finish_reason")
+                        if fr:
+                            span.set_attribute("llm.finish_reason", str(fr))
+                        # Extract provider safety ratings if present (e.g. Google Vertex)
+                        safety = resp_meta.get("safety_ratings")
+                        if safety:
+                            try:
+                                span.set_attribute("llm.safety_ratings", json.dumps(safety)[:500])
+                            except Exception:
+                                pass
     
     def _record_langchain_llm_metrics(self, span: Any, response: LLMResult, run_id: UUID) -> None:
         """Record LLM metrics (tokens, cost, duration) for LangChain runs."""

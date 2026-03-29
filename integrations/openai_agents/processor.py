@@ -311,6 +311,9 @@ class TracciaAgentsTracingProcessor:
             guardrail_name = getattr(span_data, "name", None)
             if guardrail_name:
                 attrs["agent.guardrail.name"] = guardrail_name
+                attrs["guardrail.name"] = guardrail_name
+            attrs["guardrail.source_sdk"] = "openai_agents"
+            attrs["guardrail.evidence_type"] = "span_attribute"
         
         return attrs
 
@@ -368,6 +371,7 @@ class TracciaAgentsTracingProcessor:
             elif span_type == "guardrail":
                 triggered = getattr(span_data, "triggered", False)
                 traccia_span.set_attribute("agent.guardrail.triggered", triggered)
+                traccia_span.set_attribute("guardrail.triggered", triggered)
             
             elif span_type == "response":
                 response = getattr(span_data, "response", None)

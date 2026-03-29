@@ -124,6 +124,21 @@ def _extract_llm_attributes(span_attrs: Dict[str, Any], bound_args: inspect.Boun
         pass
 
 
+def _validate_guardrail_span(span_attrs: Dict[str, Any]) -> None:
+    """Log warnings for guardrail-typed spans missing recommended attributes."""
+    try:
+        from traccia.guardrails.helpers import validate_guardrail_attributes
+        import logging
+        # triggered may be set after the function returns (bool auto-trigger)
+        warnings = validate_guardrail_attributes(span_attrs, require_triggered=False)
+        if warnings:
+            _logger = logging.getLogger("traccia.guardrails")
+            for w in warnings:
+                _logger.warning(w)
+    except Exception:
+        pass
+
+
 def observe(
     name: Optional[str] = None,
     *,
@@ -177,9 +192,19 @@ def observe(
             if inferred_type == "llm":
                 _extract_llm_attributes(span_attrs, bound)
 
+            # Validate guardrail-typed spans for completeness
+            if inferred_type == "guardrail":
+                _validate_guardrail_span(span_attrs)
+
             with tracer.start_as_current_span(span_name, attributes=span_attrs) as span:
                 try:
                     result = func(*args, **kwargs)
+                    # For guardrail-typed spans: auto-set triggered from bool return value
+                    # so developers don't need to manually call get_current_span().
+                    # Only applies when triggered was not pre-set in attributes={}.
+                    if inferred_type == "guardrail" and isinstance(result, bool):
+                        if span.attributes.get("guardrail.triggered") is None:
+                            span.set_attribute("guardrail.triggered", result)
                     if not skip_result:
                         # Convert result to OTel-compatible type
                         otel_result = _convert_to_otel_type(result)
@@ -228,9 +253,17 @@ def observe(
             if inferred_type == "llm":
                 _extract_llm_attributes(span_attrs, bound)
 
+            # Validate guardrail-typed spans for completeness
+            if inferred_type == "guardrail":
+                _validate_guardrail_span(span_attrs)
+
             async with tracer.start_as_current_span(span_name, attributes=span_attrs) as span:
                 try:
                     result = await func(*args, **kwargs)
+                    # For guardrail-typed spans: auto-set triggered from bool return value.
+                    if inferred_type == "guardrail" and isinstance(result, bool):
+                        if span.attributes.get("guardrail.triggered") is None:
+                            span.set_attribute("guardrail.triggered", result)
                     if not skip_result:
                         # Convert result to OTel-compatible type
                         otel_result = _convert_to_otel_type(result)

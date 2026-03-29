@@ -14,6 +14,7 @@ from traccia.processors.cost_processor import CostAnnotatingProcessor
 from traccia.processors.logging_processor import LoggingSpanProcessor
 from traccia.processors.agent_enricher import AgentEnrichmentProcessor
 from traccia.processors.rate_limiter import RateLimiter, RateLimitingSpanProcessor
+from traccia.processors.guardrail_detector import GuardrailDetectorProcessor
 
 __all__ = [
     "BatchSpanProcessor",
@@ -32,4 +33,5 @@ __all__ = [
     "AgentEnrichmentProcessor",
     "RateLimiter",
     "RateLimitingSpanProcessor",
+    "GuardrailDetectorProcessor",
 ]
