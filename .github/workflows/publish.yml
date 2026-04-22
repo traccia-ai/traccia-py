@@ -33,7 +33,6 @@ jobs:
 
       - name: Refresh pricing snapshot
         run: python scripts/build_pricing_snapshot.py
-        working-directory: traccia-py
       
       - name: Build package
         run: |
