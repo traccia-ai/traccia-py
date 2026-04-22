@@ -228,12 +228,12 @@ class TracciaAgentsTracingProcessor:
                     attributes=attributes
                 )
             
-            # Cost
+            # Cost — use the process-level resolver so pricing_override applied
+            # via start_tracing() is reflected here too (trace/metrics parity).
             if prompt_tokens is not None and completion_tokens is not None:
                 try:
-                    from traccia.processors.cost_engine import compute_cost
-                    from traccia.pricing_config import load_pricing
-                    cost = compute_cost(str(model), prompt_tokens, completion_tokens, load_pricing())
+                    from traccia.cost_resolver import get_resolver
+                    cost = get_resolver().compute(str(model), prompt_tokens, completion_tokens)
                     if cost is not None and cost > 0:
                         recorder.record_cost(cost, attributes=attributes)
                 except Exception:

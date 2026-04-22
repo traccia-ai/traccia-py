@@ -29,7 +29,11 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build twine
+          pip install build twine requests
+
+      - name: Refresh pricing snapshot
+        run: python scripts/build_pricing_snapshot.py
+        working-directory: traccia-py
       
       - name: Build package
         run: |
