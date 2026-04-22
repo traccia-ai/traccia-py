@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-18T12:06:15Z",
+  "generated_at": "2026-04-22T15:07:43Z",
   "source": "litellm",
   "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
   "models": {
@@ -485,6 +485,14 @@
       "cache_write": 0.00625,
       "cached_prompt": 0.0005,
       "_provider": "bedrock_converse",
+      "_mode": "chat",
+      "_max_tokens": 128000,
+      "_max_input_tokens": 1000000
+    },
+    "anthropic.claude-mythos-preview": {
+      "prompt": 0.0,
+      "completion": 0.0,
+      "_provider": "bedrock",
       "_mode": "chat",
       "_max_tokens": 128000,
       "_max_input_tokens": 1000000
@@ -15197,6 +15205,15 @@
       "_max_input_tokens": 2000000
     },
     "xai/grok-4.20-beta-0309-reasoning": {
+      "prompt": 0.002,
+      "completion": 0.006,
+      "cached_prompt": 0.0002,
+      "_provider": "xai",
+      "_mode": "chat",
+      "_max_tokens": 2000000,
+      "_max_input_tokens": 2000000
+    },
+    "xai/grok-4.20-0309-reasoning": {
       "prompt": 0.002,
       "completion": 0.006,
       "cached_prompt": 0.0002,

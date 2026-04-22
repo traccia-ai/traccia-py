@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          path: "."
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,6 +35,7 @@ jobs:
 
       - name: Refresh pricing snapshot
         run: python scripts/build_pricing_snapshot.py
+        working-directory: ${{ github.workspace }}
       
       - name: Build package
         run: |
