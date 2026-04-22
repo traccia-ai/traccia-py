@@ -525,11 +525,20 @@ def start_tracing(
         provider.add_span_processor(TokenCountingProcessor())
     cost_processor = None
     if enable_costs:
-        pricing_table, pricing_source = pricing_config.load_pricing_with_source(pricing_override)
+        pricing_table, pricing_source, pricing_generated_at = pricing_config.load_pricing_with_source(pricing_override)
         cost_processor = CostAnnotatingProcessor(
-            pricing_table=pricing_table, pricing_source=pricing_source
+            pricing_table=pricing_table,
+            pricing_source=pricing_source,
+            pricing_generated_at=pricing_generated_at,
         )
         provider.add_span_processor(cost_processor)
+        # Initialise the process-level resolver so other paths (e.g. the OpenAI
+        # Agents integration metric recorder) use the same pricing table.
+        try:
+            from traccia.cost_resolver import CostResolver, set_resolver
+            set_resolver(CostResolver(pricing_table, pricing_source, pricing_generated_at))
+        except Exception:
+            pass
     if enable_span_logging:
         provider.add_span_processor(LoggingSpanProcessor())
     # Agent enrichment: use init-time identity as default so span-level overrides win over resource/defaults.
@@ -859,8 +868,17 @@ def _start_pricing_refresh(cost_processor: Optional[CostAnnotatingProcessor], ov
             if _pricing_refresh_stop.is_set():
                 break
             try:
-                table, source = pricing_config.load_pricing_with_source(override)
-                cost_processor.update_pricing_table(table, pricing_source=source)
+                table, source, generated_at = pricing_config.load_pricing_with_source(override)
+                cost_processor.update_pricing_table(
+                    table, pricing_source=source, pricing_generated_at=generated_at
+                )
+                # Keep the process-level resolver in sync so the OpenAI Agents
+                # integration metric path also picks up the refreshed pricing.
+                try:
+                    from traccia.cost_resolver import get_resolver
+                    get_resolver().update(table, source, generated_at)
+                except Exception:
+                    pass
             except Exception:
                 continue
 

@@ -616,6 +616,156 @@ traccia check
 traccia check --endpoint http://tempo:4318/v1/traces
 ```
 
+### `traccia pricing`
+
+Manage the local LLM pricing snapshot used for cost estimation:
+
+```bash
+# Show current pricing source, age, and model count
+traccia pricing status
+
+# Download the latest pricing — tries the Traccia platform first,
+# automatically falls back to the upstream pricing source if the platform
+# is unreachable (e.g. no Traccia account, network error)
+traccia pricing refresh
+
+# Force-fetch directly from the upstream pricing source (skips the platform)
+traccia pricing refresh --source upstream
+
+# Remove local cache — reverts to the bundled snapshot shipped with the SDK
+traccia pricing clear
+```
+
+---
+
+## Pricing
+
+### How cost estimation works
+
+Traccia computes estimated LLM costs locally at span-end time using a pricing
+table that resolves in the following order (highest precedence first):
+
+| Priority | Source | Set via |
+|---|---|---|
+| 1 | **Programmatic override** | `start_tracing(pricing_override={...})` |
+| 2 | **Env var override** | `TRACCIA_PRICING_OVERRIDE_JSON='{"model": {"prompt": x, "completion": y}}'` |
+| 3 | **Local cache** | `traccia pricing refresh` (stored in `~/.cache/traccia/pricing.json`) |
+| 4 | **Bundled snapshot** | Ships inside the SDK wheel (generated from LiteLLM at release time) |
+
+
+### Keeping prices fresh
+
+The bundled snapshot is generated at SDK release time from an upstream pricing
+database (2500+ models). It is refreshed automatically on every SDK release via
+the CI/CD pipeline — so `pip install --upgrade traccia` always brings a
+reasonably current snapshot.
+
+Between releases, you can pull the latest pricing without upgrading the SDK:
+
+```bash
+traccia pricing refresh    # platform → upstream fallback
+```
+
+The SDK warns you when the active snapshot is outdated:
+
+- **>7 days old:** `logger.info` — reminder to refresh
+- **>30 days old:** `logger.warning` — includes the exact command
+
+Every span also carries these attributes so the platform can always see how
+fresh the SDK's pricing was at emit time:
+
+| Attribute | Description |
+|---|---|
+| `llm.pricing.generated_at` | ISO timestamp of the pricing snapshot |
+| `llm.pricing.age_days` | Integer age in days at emit time |
+| `llm.pricing.source` | One of `bundled \| local_cache \| env \| override` |
+
+### Platform-side authoritative pricing
+
+If you use the Traccia platform, it maintains its own pricing sync (every 6 hours
+by default). Costs shown in the platform UI are recomputed using the platform's
+authoritative snapshot, which is always fresher than the SDK's bundled table:
+
+```
+org override > platform snapshot > bundled fallback
+```
+
+When the platform recomputes a cost, it writes `platform_cost_usd` alongside the
+original `llm.cost.usd` on each span — the SDK-reported value is **never
+overwritten**. In the span detail panel you will see both values clearly labeled:
+
+- **"Traccia recomputed cost"** — what the platform computed, with a tooltip
+  showing whether it came from an automatic pricing update or an org override.
+- **"SDK-side pricing context (at emit time)"** — the `llm.pricing.*` attributes,
+  collapsed by default, showing what prices the SDK saw when the span was emitted.
+
+Use `traccia pricing refresh` to sync the platform's snapshot into your SDK's local
+cache — then `llm.cost.usd` and `platform_cost_usd` will converge.
+
+#### When SDK and platform costs diverge
+
+You may occasionally see a muted "SDK reported $X.XX" line on the costs page.
+This happens when the two sources used different rates, for three legitimate reasons:
+
+| Reason | How to resolve |
+|---|---|
+| SDK's local cache or bundled snapshot is slightly older than the platform's current snapshot | Temporary — platform catches up within 6 hours, or click "Sync now" in Settings → Pricing. Running `traccia pricing refresh` also syncs the SDK. |
+| SDK-level override set via `pricing_override=...` or `TRACCIA_PRICING_OVERRIDE_JSON` | Intentional — the SDK override applies only to `llm.cost.usd` for that process. The platform uses its own snapshot + org overrides for `platform_cost_usd`. |
+| Org override set in Settings → Pricing on the platform | Intentional — org overrides apply to `platform_cost_usd` for all agents in the org. They do not change what SDK processes report. |
+
+The platform **never uses the SDK's local cache** as input to its own recomputation.
+Each agent process may have a different cached version, and the platform needs one
+consistent source for cross-agent reporting. SDK pricing affects what gets emitted
+in spans; platform pricing determines what gets shown in aggregate dashboards.
+
+### Override JSON schema
+
+All pricing overrides — whether set programmatically, via environment variable, or
+via the Traccia platform settings — use the same JSON shape:
+
+```json
+{
+  "<model-name>": {
+    "prompt": 0.005,
+    "completion": 0.015,
+    "cache_write": 0.001,
+    "cached_prompt": 0.0005
+  }
+}
+```
+
+All rates are **USD per 1,000 tokens**. `cache_write` and `cached_prompt` are
+optional (for models with prompt-caching pricing, e.g. Claude 3.5).
+
+### Overriding pricing
+
+Overrides always win over any other source:
+
+```python
+# Programmatic (per-process) — both span attributes and cost metrics will use this
+traccia.start_tracing(
+    pricing_override={
+        "gpt-4o": {"prompt": 0.005, "completion": 0.015},
+        "my-fine-tuned-model": {"prompt": 0.01, "completion": 0.02},
+    }
+)
+```
+
+```bash
+# Environment variable (persistent across restarts)
+export TRACCIA_PRICING_OVERRIDE_JSON='{"gpt-4o": {"prompt": 0.005, "completion": 0.015}}'
+```
+
+> **Deprecation notice:** `AGENT_DASHBOARD_PRICING_JSON` is accepted as a
+> back-compat alias for `TRACCIA_PRICING_OVERRIDE_JSON` but will be removed in
+> a future minor version. Rename the variable in your environment.
+
+**Platform overrides (org-level):** Org admins can set pricing overrides in
+**Settings → Pricing** on the Traccia platform. These apply to the
+platform-recomputed cost (`platform_cost_usd`) for all agents in the org. They
+do not change `llm.cost.usd` on existing spans retroactively unless you
+explicitly enable the "Also recompute past traces" option in the save dialog.
+
 ---
 
 ## 🎨 Advanced Features
@@ -816,6 +966,7 @@ Initialize the Traccia SDK. All parameters are optional; configuration is merged
 - `enable_patching` (bool): Auto-patch OpenAI, Anthropic, requests (default: True)
 - `enable_token_counting` (bool): Count tokens (default: True)
 - `enable_costs` (bool): Calculate costs (default: True)
+- `pricing_override` (dict): Per-model pricing override — always wins over all other sources. See [Pricing](#pricing) section below.
 - `openai_agents` (bool): Auto-enable OpenAI Agents SDK integration (default: True)
 - `crewai` (bool): Auto-enable CrewAI integration (default: True)
 - `guardrail_heuristics` (bool): Enable Tier C heuristic guardrail detection (default: True)

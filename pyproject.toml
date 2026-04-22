@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traccia"
-version = "0.1.19"
+version = "0.1.20"
 description = "Production-ready distributed tracing SDK for AI agents and LLM applications"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -61,6 +61,7 @@ Issues = "https://github.com/traccia-ai/traccia-py/issues"
 package-dir = {"traccia" = "."}
 packages = [
     "traccia",
+    "traccia.data",
     "traccia.exporter",
     "traccia.instrumentation",
     "traccia.integrations",
@@ -74,6 +75,9 @@ packages = [
     "traccia.utils",
     "traccia.metrics",
 ]
+
+[tool.setuptools.package-data]
+"traccia.data" = ["pricing_snapshot.json"]
 
 [project.scripts]
 traccia = "traccia.cli:main"
