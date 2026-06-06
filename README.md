@@ -1,27 +1,28 @@
 # Traccia
 
-**Production-ready distributed tracing for AI agents and LLM applications**
+**OpenTelemetry-based observability, distributed tracing, governance, and compliance for AI agents and LLM applications**
 
-Traccia is a lightweight, high-performance Python SDK for observability and tracing of AI agents, LLM applications, and complex distributed systems. Built on OpenTelemetry standards with specialized instrumentation for AI workloads.
+Traccia is a production-ready Python SDK for observability, tracing, governance, and compliance across AI agents, LLM applications, agentic workflows, and distributed AI systems.
+
+Built on OpenTelemetry standards, Traccia provides automatic instrumentation, token and cost tracking, guardrail detection, AI governance evidence, and OTLP-compatible exports for modern AI applications.
 
 [Traccia](https://pypi.org/project/traccia/) is available on PyPI.
 
-## ✨ Features
+## Features
 
-- **🔍 Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, requests, and HTTP libraries
-- **🤖 Framework Integrations**: Support for LangChain, CrewAI, and OpenAI Agents SDK
-- **📊 LLM-Aware Tracing**: Track tokens, costs, prompts, and completions automatically
-- **📈 OpenTelemetry Metrics**: Emit OTEL-compliant metrics for accurate cost/token tracking (independent of sampling)
-- **⚡ Zero-Config Start**: Simple `init()` call with automatic config discovery
-- **🎯 Decorator-Based**: Trace any function with `@observe` decorator
-- **🔧 Multiple Exporters**: OTLP (compatible with Grafana Tempo, Jaeger, Zipkin), Console, or File
-- **🛡️ Production-Ready**: Rate limiting, error handling, config validation, robust 
-flushing
-- **🛡️ Guardrail Detection**: Passive, zero-overhead detection of guardrails in traces — explicit, provider-native, and heuristic
-- **⚖️ Governance**: Art. 50 transparency evidence, EU risk-tier on spans, integrity hashes, and PII redaction before export
-- **📝 Type-Safe**: Full Pydantic validation for configuration
-- **🚀 High Performance**: Efficient batching, async support, minimal overhead
-- **🔐 Secure**: No secrets in logs, configurable data truncation
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, requests, and HTTP libraries
+- **Framework Integrations**: Support for LangChain, CrewAI, and OpenAI Agents SDK
+- **LLM-Aware Tracing**: Track tokens, costs, prompts, completions, and latency automatically
+- **OpenTelemetry Metrics**: Emit OTEL-compliant metrics for accurate token and cost tracking independent of sampling
+- **Zero-Configuration Setup**: Simple `init()` call with automatic configuration discovery
+- **Decorator-Based Tracing**: Trace any function with the `@observe` decorator
+- **Multiple Exporters**: OTLP-compatible export to Grafana Tempo, Jaeger, Zipkin, SigNoz, Console, or File
+- **Production-Ready Architecture**: Rate limiting, error handling, configuration validation, and reliable flushing
+- **Guardrail Detection**: Passive detection of AI safety controls, provider-native safeguards, and custom guardrails
+- **AI Governance and Compliance**: EU AI Act evidence, transparency records, integrity verification, and PII redaction
+- **Type-Safe Configuration**: Full Pydantic validation and configuration management
+- **High Performance**: Efficient batching, async support, and low-overhead instrumentation
+- **Security Controls**: No secrets in logs and configurable data truncation
 
 ---
 
