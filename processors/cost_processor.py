@@ -93,6 +93,10 @@ class CostAnnotatingProcessor(SpanProcessor):
         if "llm.cost.usd" in (span.attributes or {}):
             return
 
+        span_type = str((span.attributes or {}).get("span.type") or "").lower()
+        if span_type and span_type != "llm":
+            return
+
         model = span.attributes.get("llm.model")
         prompt = span.attributes.get("llm.usage.prompt_tokens")
         completion = span.attributes.get("llm.usage.completion_tokens")

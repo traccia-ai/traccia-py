@@ -1,6 +1,8 @@
 """Context utilities for the tracing SDK."""
 
 from traccia.context.context import get_current_span, pop_span, push_span
+from traccia.context.run_with_span import run_with_span, run_with_span_async
+from traccia.context.span_scope import SpanScope, span_scope
 from traccia.context.propagators import (
     extract_trace_context,
     extract_tracestate,
@@ -19,6 +21,10 @@ __all__ = [
     "get_current_span",
     "push_span",
     "pop_span",
+    "run_with_span",
+    "run_with_span_async",
+    "SpanScope",
+    "span_scope",
     "format_traceparent",
     "inject_traceparent",
     "parse_traceparent",

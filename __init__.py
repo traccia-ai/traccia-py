@@ -3,6 +3,13 @@
 from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace, force_flush
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
+from traccia.context import (
+    get_current_span,
+    run_with_span,
+    run_with_span_async,
+    SpanScope,
+    span_scope,
+)
 from traccia import metrics
 from traccia.identity import AgentIdentity
 from traccia import runtime_config
@@ -84,6 +91,11 @@ __all__ = [
     "end_auto_trace",
     "force_flush",
     "span",
+    "span_scope",
+    "SpanScope",
+    "get_current_span",
+    "run_with_span",
+    "run_with_span_async",
     "observe",
     "metrics",
 ]

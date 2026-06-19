@@ -247,6 +247,49 @@ class TestCostAnnotatingProcessor:
         # Must not overwrite
         assert span.attributes["llm.cost.usd"] == 0.99
 
+    def test_skips_non_llm_span_type(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "span.type": "span",
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert "llm.cost.usd" not in span.attributes
+
+    def test_does_not_skip_llm_span_type_lowercase(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "span.type": "llm",
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert "llm.cost.usd" in span.attributes
+
+    def test_does_not_skip_llm_span_type_uppercase(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "span.type": "LLM",
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert "llm.cost.usd" in span.attributes
+
+    def test_annotates_span_without_span_type(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert "llm.cost.usd" in span.attributes
+
     def test_update_pricing_table_refreshes_age(self):
         proc = self._make_processor()
         new_table = {"claude-3-opus": {"prompt": 0.015, "completion": 0.075}}
@@ -285,7 +328,7 @@ class TestCostAnnotatingProcessor:
 
 class TestNormalizer:
     def test_basic_normalization(self):
-        from app.services.pricing.normalizer import normalize
+        from traccia.pricing_normalizer import normalize
         raw = {
             "gpt-4": {
                 "input_cost_per_token": 0.00003,
@@ -302,13 +345,13 @@ class TestNormalizer:
         assert entry["_provider"] == "openai"
 
     def test_skips_entries_without_cost(self):
-        from app.services.pricing.normalizer import normalize
+        from traccia.pricing_normalizer import normalize
         raw = {"no-cost-model": {"max_tokens": 4096}}
         result = normalize(raw)
         assert "no-cost-model" not in result
 
     def test_optional_fields(self):
-        from app.services.pricing.normalizer import normalize
+        from traccia.pricing_normalizer import normalize
         raw = {
             "claude-3": {
                 "input_cost_per_token": 0.000003,
@@ -323,21 +366,21 @@ class TestNormalizer:
         assert "cached_prompt" in entry
 
     def test_diff_detects_changed_keys(self):
-        from app.services.pricing.normalizer import diff_models
+        from traccia.pricing_normalizer import diff_models
         prev = {"gpt-4": {"prompt": 0.03, "completion": 0.06}}
         curr = {"gpt-4": {"prompt": 0.04, "completion": 0.06}}  # prompt changed
         changed = diff_models(prev, curr)
         assert "gpt-4" in changed
 
     def test_diff_ignores_metadata(self):
-        from app.services.pricing.normalizer import diff_models
+        from traccia.pricing_normalizer import diff_models
         prev = {"gpt-4": {"prompt": 0.03, "completion": 0.06, "_provider": "openai"}}
         curr = {"gpt-4": {"prompt": 0.03, "completion": 0.06, "_provider": "azure"}}
         changed = diff_models(prev, curr)
         assert "gpt-4" not in changed
 
     def test_diff_catches_new_model(self):
-        from app.services.pricing.normalizer import diff_models
+        from traccia.pricing_normalizer import diff_models
         prev = {}
         curr = {"new-model": {"prompt": 0.01, "completion": 0.02}}
         changed = diff_models(prev, curr)
