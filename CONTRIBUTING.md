@@ -393,7 +393,7 @@ If you have questions about contributing:
 
 ## License
 
-By contributing to Traccia SDK, you agree that your contributions will be licensed under the same license as the project (see LICENSE file).
+By contributing to Traccia SDK, you agree that your contributions will be licensed under the same license as the project (see [LICENSE](LICENSE) file).
 
 ---
 
