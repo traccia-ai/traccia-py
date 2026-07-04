@@ -1,0 +1,70 @@
+name: "Feature Request"
+description: "Suggest a new feature or enhancement for Traccia."
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thank you for suggesting an improvement to Traccia.
+        Please fill in as much detail as you can to help us evaluate the request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem are you facing? What is currently missing or painful?
+      placeholder: "e.g. There is no way to trace async LLM tool calls across agent steps."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: If you have an idea for how to solve it, describe it here. This is optional.
+      placeholder: "e.g. Add a context propagation helper for async agent frameworks like LangGraph."
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      description: Which part of Traccia does this relate to?
+      options:
+        - "Tracing / Spans"
+        - "Governance / Policy"
+        - "Compliance"
+        - "LLM Integrations"
+        - "Agent Support"
+        - "SDK / Core"
+        - "Exporter / Collector"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-information
+    attributes:
+      label: Additional Information
+      description: Any relevant links, papers, OTel proposals, or screenshots.
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Are you willing to implement this feature?
+      description: Maintainers are happy to provide guidance and review.
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this has not been requested before.
+          required: true
+        - label: This is a single feature request (not multiple combined).
+          required: true

@@ -27,66 +27,11 @@ This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md) that all contrib
 
 ### Reporting Bugs
 
-If you find a bug, please help us fix it by reporting it. Before creating a bug report:
-
-1. **Check existing issues** - The bug might already be reported or fixed
-2. **Check the documentation** - Make sure you're using the SDK correctly
-3. **Reproduce the issue** - Try to reproduce it with the latest version
-
-When reporting a bug, please include:
-
-- **Clear title and description** - What happened and what you expected
-- **Steps to reproduce** - Minimal code example that demonstrates the issue
-- **Environment details**:
-  - Python version
-  - Traccia SDK version
-  - Operating system
-  - Any relevant dependencies and versions
-- **Error messages and stack traces** - Full error output if applicable
-- **Minimal reproduction code** - A small code snippet that reproduces the issue
-
-Example bug report template:
-
-```markdown
-**Describe the bug**
-A clear and concise description of what the bug is.
-
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Run '...'
-2. Call '...'
-3. See error
-
-**Expected behavior**
-A clear and concise description of what you expected to happen.
-
-**Environment:**
-- Python version: 3.x.x
-- Traccia SDK version: x.x.x
-- OS: [e.g., macOS, Linux, Windows]
-
-**Code snippet:**
-Minimal code that reproduces the issue
-
-**Error output:**
-Paste error messages here
-```
+If you find a bug, please help us fix it by reporting it using the provided Bug Report issue template.
 
 ### Suggesting Enhancements
 
-We welcome suggestions for new features and improvements! When suggesting an enhancement:
-
-1. **Check existing issues** - Your idea might already be discussed
-2. **Provide context** - Explain the use case and why it would be valuable
-3. **Consider alternatives** - Have you explored workarounds?
-4. **Be specific** - Describe the desired behavior clearly
-
-Enhancement suggestions should include:
-
-- **Clear description** - What feature or improvement you'd like
-- **Use case** - Why this would be useful
-- **Proposed solution** - How you envision it working (if you have ideas)
-- **Alternatives considered** - Other approaches you've thought about
+We welcome suggestions for new features and improvements! When suggesting an enhancement, please use the provided Feature Request issue template.
 
 ### Improving Documentation
 

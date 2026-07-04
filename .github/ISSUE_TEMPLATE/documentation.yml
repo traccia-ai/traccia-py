@@ -1,0 +1,64 @@
+name: "Documentation Issue"
+description: "Report missing, incorrect, or unclear documentation."
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Good documentation is critical for an SDK. 
+        Let us know what is missing or confusing so we can improve it.
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: Documentation Type
+      description: What kind of documentation issue is this?
+      options:
+        - "Missing documentation"
+        - "Incorrect / outdated information"
+        - "Unclear or confusing explanation"
+        - "Missing code example"
+        - "Broken link"
+        - "Other"
+    validations:
+      required: true
+
+  - type: input
+    id: doc-location
+    attributes:
+      label: Documentation Location
+      description: Link to the page or file with the issue.
+      placeholder: "https://docs.traccia.dev/... or docs/getting-started.md"
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Issue
+      description: What is wrong, missing, or unclear?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested Fix
+      description: If you know what the correct content should be, describe it here.
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Are you willing to submit a fix?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and this has not been reported before.
+          required: true
