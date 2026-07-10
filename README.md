@@ -1159,6 +1159,41 @@ pytest traccia/tests/ --cov=traccia --cov-report=html
 
 Traccia adds **GovernanceEvent** attributes on spans automatically (event type, integrity hash, timestamp source). No EU-specific setup is required for default tracing. **Human review** (approve/reject, audit trail) is done in the **Governance Hub** on the platform — not in the SDK.
 
+### `@observe` vs `@govern`
+
+| Decorator | Purpose | Requires Traccia platform |
+|-----------|---------|---------------------------|
+| `@observe` | Observability only — creates trace spans | No (works with any OTLP backend) |
+| `@govern` | Observability **plus** runtime policy enforcement | **Yes** — calls the Traccia agent-status API before each run |
+
+`@govern` is for teams using the Traccia platform to block or warn on agent execution based on live policies. Open-source or self-hosted tracing-only users should use `@observe`.
+
+Policy URLs are derived automatically from your tracing endpoint (`{base}/api/v1/agents/{agent_id}/status`). You do **not** need a `[governance]` section in `traccia.toml` unless you use a non-standard deployment.
+
+```python
+from traccia import init, govern
+from traccia.governance import AgentBlockedError
+
+init(api_key="...", endpoint="https://api.traccia.ai/v1/traces")
+
+@govern(agent_id="my-agent", fail_open=False, name="run_agent")
+def run_agent(prompt: str) -> str:
+    return call_llm(prompt)
+```
+
+Set `TRACCIA_AGENT_ID` instead of passing `agent_id` on each decorator. On hard block, `@govern` raises `AgentBlockedError`.
+
+**Advanced (optional):** override endpoints or cache TTL in `traccia.toml`:
+
+```toml
+[governance]
+status_check_endpoint = "https://custom.example/agents/{agent_id}/status"
+post_block_endpoint = "https://custom.example/agents/{agent_id}/blocks"
+status_cache_ttl_seconds = 120
+```
+
+Or pass `status_check_endpoint`, `post_block_endpoint`, or `status_cache_ttl_seconds` to `init()`.
+
 ### Human review (platform only)
 
 Queue and decide reviews in **Governance Hub → Reviews** using a **trace ID**. The SDK does not create review queue rows. Use the dashboard when a person must sign off before you rely on an automated output.

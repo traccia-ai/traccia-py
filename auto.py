@@ -127,6 +127,16 @@ def init(
     
     # Add rate limiting config back into merged_config for start_tracing
     merged_config.update(rate_limit_config)
+
+    # Optional advanced governance overrides (defaults derive from tracing endpoint)
+    from traccia.governance.config import configure_governance
+
+    configure_governance(
+        status_check_endpoint=merged_config.pop("status_check_endpoint", None),
+        post_block_endpoint=merged_config.pop("post_block_endpoint", None),
+        status_cache_ttl_seconds=merged_config.pop("status_cache_ttl_seconds", None),
+        config_file=config_file,
+    )
     
     # Initialize via start_tracing with full config
     provider = start_tracing(**merged_config)

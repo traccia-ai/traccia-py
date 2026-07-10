@@ -3,6 +3,7 @@
 from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace, force_flush
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
+from traccia.governance import govern, AgentBlockedError
 from traccia.context import (
     get_current_span,
     run_with_span,
@@ -97,6 +98,8 @@ __all__ = [
     "run_with_span",
     "run_with_span_async",
     "observe",
+    "govern",
+    "AgentBlockedError",
     "metrics",
 ]
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traccia"
-version = "0.1.22"
+version = "0.1.23"
 description = "Production-ready distributed tracing SDK for AI agents and LLM applications"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -42,6 +42,7 @@ dependencies = [
     "tomli>=2.0.0; python_version < '3.11'",
     "toml>=0.10.0",
     "pydantic>=2.0.0",
+    "requests>=2.25.0",
 ]
 
 [project.optional-dependencies]
