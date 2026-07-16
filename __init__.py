@@ -14,6 +14,13 @@ from traccia.context import (
 from traccia import metrics
 from traccia.identity import AgentIdentity
 from traccia import runtime_config
+from traccia.prompts import (
+    load_prompt,
+    prefetch_prompts,
+    LoadedPrompt,
+    CompileError,
+    PromptFetchError,
+)
 
 # Version exposure
 try:
@@ -101,5 +108,10 @@ __all__ = [
     "govern",
     "AgentBlockedError",
     "metrics",
+    "load_prompt",
+    "prefetch_prompts",
+    "LoadedPrompt",
+    "CompileError",
+    "PromptFetchError",
 ]
 

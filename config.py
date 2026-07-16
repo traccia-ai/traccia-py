@@ -66,6 +66,8 @@ ENV_VAR_MAPPING = {
     
     # Advanced
     "attr_truncation_limit": ["TRACCIA_ATTR_TRUNCATION_LIMIT"],
+    "prompt_cache_ttl_s": ["TRACCIA_PROMPT_CACHE_TTL_S"],
+    "prompt_api_base": ["TRACCIA_PROMPT_API_BASE"],
 }
 
 

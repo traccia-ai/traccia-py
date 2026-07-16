@@ -55,3 +55,19 @@ def test_apply_redaction_to_span_mutates():
     assert n >= 1
     assert "[REDACTED_EMAIL]" in span.attributes["gen_ai.completion"]
     assert span.attributes["governance.redaction_applied"] is True
+
+
+def test_redaction_allowlists_traccia_prompt_identity():
+    attrs = {
+        "traccia.prompt.name": "support-reply",
+        "traccia.prompt.version": "3",
+        "traccia.prompt.version_id": "uuid-1",
+        "traccia.prompt.label": "production",
+        "llm.prompt": "secret@example.com",
+    }
+    out = redact_attributes(attrs)
+    assert out["traccia.prompt.name"] == "support-reply"
+    assert out["traccia.prompt.version"] == "3"
+    assert out["traccia.prompt.version_id"] == "uuid-1"
+    assert out["traccia.prompt.label"] == "production"
+    assert "[REDACTED_EMAIL]" in out["llm.prompt"]

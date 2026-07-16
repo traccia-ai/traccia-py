@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traccia"
-version = "0.1.24"
+version = "0.1.25"
 description = "Production-ready distributed tracing SDK for AI agents and LLM applications"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -72,6 +72,7 @@ packages = [
     "traccia.processors",
     "traccia.guardrails",
     "traccia.governance",
+    "traccia.prompts",
     "traccia.tracer",
     "traccia.context",
     "traccia.utils",

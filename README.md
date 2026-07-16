@@ -23,6 +23,7 @@ Built on OpenTelemetry standards, Traccia provides automatic instrumentation, to
 - **Type-Safe Configuration**: Full Pydantic validation and configuration management
 - **High Performance**: Efficient batching, async support, and low-overhead instrumentation
 - **Security Controls**: No secrets in logs and configurable data truncation
+- **Prompt Management**: `load_prompt` / `prefetch_prompts` with cache, stale-while-revalidate, fallback, and `traccia.prompt.*` span identity
 
 ---
 
@@ -72,6 +73,33 @@ def generate_text(prompt: str) -> str:
 # Automatically tracks: model, tokens, cost, prompt, completion, latency
 text = generate_text("Write a haiku about Python")
 ```
+
+### Load a versioned prompt
+
+Fetch prompts from your Traccia prompt registry by name and deploy label. Compiling fills `{{variables}}` and stamps the active span with prompt identity.
+
+```python
+from traccia import init, observe, load_prompt, prefetch_prompts
+
+init(api_key="...", prompt_cache_ttl_s=60)
+prefetch_prompts(["support-reply"])  # optional warm-up
+
+@observe(as_type="llm")
+def reply(question: str) -> str:
+    prompt = load_prompt(
+        "support-reply",
+        label="production",
+        fallback={
+            "type": "chat",
+            "messages": [{"role": "system", "content": "You are a helpful assistant."}],
+        },
+    )
+    messages = prompt.compile(question=question)
+    # pass messages to your LLM client
+    return messages[-1]["content"]
+```
+
+Requires the [Traccia platform](https://app.traccia.ai): create a workspace API key under **Settings → API Keys**. Tracing and prompt fetch use the same key and default to `https://api.traccia.ai`. Pass an explicit `fallback` so agents can still run if a fetch fails. See [Prompts in the SDK](https://traccia.ai/docs/sdk/prompts).
 
 ### LangChain
 
@@ -1004,6 +1032,18 @@ Initialize the Traccia SDK. All parameters are optional; configuration is merged
 - `attr_truncation_limit` (int): Max attribute value length (default: None)
 
 **Returns**: TracerProvider instance
+
+#### `load_prompt` / `prefetch_prompts`
+
+Fetch a versioned prompt from Traccia (cache + SWR + optional fallback). See [Prompts in the SDK](https://traccia.ai/docs/sdk/prompts).
+
+```python
+from traccia import load_prompt, prefetch_prompts
+
+prefetch_prompts(["support-reply"])
+prompt = load_prompt("support-reply", label="production", fallback={...})
+messages = prompt.compile(question=q)
+```
 
 #### `stop_tracing(flush_timeout: float = 1.0) -> None`
 

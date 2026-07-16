@@ -64,8 +64,17 @@ DEFAULT_SENSITIVE_KEY_FRAGMENTS: FrozenSet[str] = frozenset(
     )
 )
 
+# Prompt identity attrs contain the substring "prompt" but must not be redacted.
+PROMPT_IDENTITY_KEY_PREFIX = "traccia.prompt."
+
+
+def _key_is_allowlisted(key: str) -> bool:
+    return key.lower().startswith(PROMPT_IDENTITY_KEY_PREFIX)
+
 
 def _key_is_sensitive(key: str, fragments: Iterable[str]) -> bool:
+    if _key_is_allowlisted(key):
+        return False
     lower = key.lower()
     return any(fragment in lower for fragment in fragments)
 
@@ -97,6 +106,9 @@ def redact_attributes(
         fragments.extend(extra_key_fragments)
     out: Dict[str, Any] = {}
     for key, value in attrs.items():
+        if _key_is_allowlisted(key):
+            out[key] = value
+            continue
         if isinstance(value, str) and (redact_all_strings or _key_is_sensitive(key, fragments)):
             out[key] = redact_string(value)
         else:
