@@ -31,22 +31,36 @@ class TestAutoStartTrace(unittest.TestCase):
         # Should NOT have auto-trace context
         self.assertIsNone(auto._auto_trace_context)
     
-    def test_manual_spans_become_children(self):
-        """Test that manually created spans become children of auto-trace."""
+    def test_auto_start_span_in_otel_context(self):
+        """Auto-started trace must be the active OTel parent for child spans."""
         init(enable_patching=False, auto_start_trace=True)
-        
+
+        auto_span = auto._auto_trace_context["span"]
+        from opentelemetry.trace import get_current_span
+
+        current = get_current_span()
+        self.assertTrue(current.get_span_context().is_valid)
+        self.assertEqual(
+            current.get_span_context().trace_id,
+            auto_span._otel_span.get_span_context().trace_id,
+        )
+        self.assertEqual(
+            current.get_span_context().span_id,
+            auto_span._otel_span.get_span_context().span_id,
+        )
+
+    def test_auto_start_parents_manual_child(self):
+        """Child spans created after auto-start share the auto trace id."""
+        init(enable_patching=False, auto_start_trace=True)
+
+        auto_span = auto._auto_trace_context["span"]
         tracer = get_tracer("test")
-        
-        # Create a manual span
-        with tracer.start_as_current_span("child-span") as span:
-            # Span should be valid
-            self.assertIsNotNone(span)
-            self.assertTrue(span._otel_span.get_span_context().is_valid)
-            
-            # Span should have a parent (the auto-started trace)
-            # Note: We can't easily verify parent relationship without inspecting internals
-            # But we can verify that span was created successfully
-            pass
+
+        with tracer.start_as_current_span("child-span") as child:
+            self.assertEqual(
+                child.context.trace_id,
+                auto_span.context.trace_id,
+            )
     
     def test_auto_trace_custom_name(self):
         """Test that auto-trace can have a custom name."""

@@ -178,7 +178,7 @@ def _start_auto_trace(provider: TracerProvider, name: str = "root") -> Any:
         from opentelemetry import context
         from opentelemetry.trace import set_span_in_context
         
-        token = context.attach(set_span_in_context(span))
+        token = context.attach(set_span_in_context(span._otel_span))
         
         logger.debug(f"Auto-started trace '{name}' created")
         
@@ -358,6 +358,8 @@ def start_tracing(
     service_role: Optional[str] = None,  # Optional logical role (e.g. orchestrator)
     compliance: Optional[dict] = None,  # e.g. {"frameworks": ["eu_ai_act"], "risk_tier": "high"}
     redact_pii: Optional[bool] = None,  # Mask email/phone/SSN on sensitive span attrs before export
+    prompt_cache_ttl_s: Optional[float] = None,  # Client cache TTL for load_prompt (default 60)
+    prompt_api_base: Optional[str] = None,  # Override host for prompt-runtime when it differs from traces
 ) -> TracerProvider:
     """
     Initialize global tracing:
@@ -402,6 +404,28 @@ def start_tracing(
         sample_rate = float(env_cfg.get("sample_rate", sample_rate))
     except Exception:
         sample_rate = sample_rate
+
+    # Prompt runtime cache — configurable via init(prompt_cache_ttl_s=...) or TRACCIA_PROMPT_CACHE_TTL_S
+    _prompt_ttl = prompt_cache_ttl_s
+    if _prompt_ttl is None:
+        _ttl_env = sdk_config.get_env_value("prompt_cache_ttl_s")
+        if _ttl_env is not None:
+            try:
+                _prompt_ttl = float(_ttl_env)
+            except (TypeError, ValueError):
+                _prompt_ttl = None
+    _prompt_base = prompt_api_base or sdk_config.get_env_value("prompt_api_base") or os.environ.get(
+        "TRACCIA_PROMPT_API_BASE"
+    )
+    try:
+        from traccia.prompts import configure_prompts
+
+        configure_prompts(
+            cache_ttl_s=_prompt_ttl if _prompt_ttl is not None else 60.0,
+            prompt_api_base=_prompt_base,
+        )
+    except Exception:
+        pass
 
     # Validate exporter configuration when OTLP is disabled
     if not use_otlp and not (enable_console_exporter or enable_file_exporter):
