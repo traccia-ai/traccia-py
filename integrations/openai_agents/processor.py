@@ -295,9 +295,12 @@ class TracciaAgentsTracingProcessor:
                 attrs["llm.model_config"] = json.dumps(model_config)[:500]
                 
         elif span_type == "function":
+            # Function spans are tool calls; set span.type so the UI classifies them as tools.
+            attrs["span.type"] = "tool"
             func_name = getattr(span_data, "name", None)
             if func_name:
                 attrs["agent.tool.name"] = func_name
+                attrs["tool.name"] = func_name
                 
         elif span_type == "handoff":
             from_agent = getattr(span_data, "from_agent", None)
