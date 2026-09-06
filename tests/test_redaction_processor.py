@@ -49,6 +49,21 @@ def test_redact_attributes_sensitive_keys():
     assert out["governance.redaction_applied"] is True
 
 
+def test_redact_attributes_covers_system_prompt_and_tool_keys():
+    attrs = {
+        "llm.anthropic.system": "Escalate to admin@corp.example",
+        "llm.anthropic.tools": '[{"description": "reachable at 555-123-4567"}]',
+        "gen_ai.request.instructions": "ping boss@corp.example",
+        "gen_ai.system": "anthropic",
+    }
+    out = redact_attributes(attrs)
+    assert "[REDACTED_EMAIL]" in out["llm.anthropic.system"]
+    assert "[REDACTED_PHONE]" in out["llm.anthropic.tools"]
+    assert "[REDACTED_EMAIL]" in out["gen_ai.request.instructions"]
+    # provider identity is still a string fragment match but has nothing to mask
+    assert out["gen_ai.system"] == "anthropic"
+
+
 def test_apply_redaction_to_span_mutates():
     span = _FakeSpan({"gen_ai.completion": "Reach sue@example.org"})
     n = apply_redaction_to_span(span)

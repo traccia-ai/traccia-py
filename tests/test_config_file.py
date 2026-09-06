@@ -284,6 +284,7 @@ class TestConfigFromEnv(unittest.TestCase):
     
     def test_load_config_from_env_all_vars(self):
         """Test loading all supported environment variables."""
+        previous_traccia_key = os.environ.pop("TRACCIA_API_KEY", None)
         os.environ.update({
             "AGENT_DASHBOARD_API_KEY": "test-key",
             "AGENT_DASHBOARD_ENDPOINT": "http://test.com",
@@ -312,6 +313,8 @@ class TestConfigFromEnv(unittest.TestCase):
             for key in list(os.environ.keys()):
                 if key.startswith("AGENT_DASHBOARD_"):
                     del os.environ[key]
+            if previous_traccia_key is not None:
+                os.environ["TRACCIA_API_KEY"] = previous_traccia_key
     
     def test_load_config_from_env_missing_vars(self):
         """Test that missing env vars don't appear in result."""
