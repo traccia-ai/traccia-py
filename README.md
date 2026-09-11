@@ -1,10 +1,12 @@
-# Traccia
+# Traccia — The Open-Source Agent Control Plane . 
 
-**OpenTelemetry-based observability, distributed tracing, evaluation, governance, and compliance for AI agents and LLM applications**
+**AI agents can act. Traccia controls what they're allowed to do.**
 
-Traccia is a production-ready Python SDK for observability, distributed tracing, evaluation, governance, and compliance across AI agents, LLM applications, agentic workflows, and multi-agent systems.
+Traccia is a production-ready Python SDK for **observing, evaluating, and enforcing policies on AI agents and LLM applications at runtime.**
 
-Built on OpenTelemetry standards, Traccia provides automatic instrumentation, token and cost tracking, offline evaluation, guardrail detection, AI governance evidence, and OTLP-compatible exports for modern AI applications.
+Built on OpenTelemetry, Traccia provides distributed tracing, token and cost tracking, evaluation, governance evidence, and runtime policy enforcement across AI agents, agentic workflows, and multi-agent systems.
+
+Framework-agnostic and built for **OpenAI Agents, LangGraph, CrewAI, and LLM applications in production.**
 
 [Traccia](https://pypi.org/project/traccia/) is available on PyPI.
 
