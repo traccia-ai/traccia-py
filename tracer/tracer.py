@@ -38,16 +38,20 @@ class Tracer:
         attributes: Optional[Dict[str, Any]] = None,
         parent: Optional[Any] = None,
         parent_context: Optional[Any] = None,
+        start_time: Optional[int] = None,
     ) -> "Span":
         """
         Start a new span.
-        
+
         Args:
             name: Span name
             attributes: Optional attributes dictionary
             parent: Optional parent span
             parent_context: Optional parent span context
-        
+            start_time: Optional explicit start time in nanoseconds since epoch.
+                Defaults to now. Use when replaying externally-timestamped events
+                (e.g. reconstructing spans from a log recorded earlier).
+
         Returns:
             Traccia Span instance (wraps OTel Span)
         """
@@ -142,15 +146,18 @@ class Tracer:
         self._check_auto_trace_conflict(name, otel_parent_context)
         
         # Start OTel span
-        otel_span = self._otel_tracer.start_span(
-            name=name,
-            attributes=attributes,
-            context=otel_parent_context,
-        )
-        
+        start_span_kwargs: Dict[str, Any] = {
+            "name": name,
+            "attributes": attributes,
+            "context": otel_parent_context,
+        }
+        if start_time is not None:
+            start_span_kwargs["start_time"] = start_time
+        otel_span = self._otel_tracer.start_span(**start_span_kwargs)
+
         # Wrap in Traccia Span
         from traccia.tracer.span import Span
-        return Span(otel_span, self, parent_span_id)
+        return Span(otel_span, self, parent_span_id, start_time_ns=start_time)
 
     def start_as_current_span(
         self,
@@ -158,16 +165,18 @@ class Tracer:
         attributes: Optional[Dict[str, Any]] = None,
         parent: Optional[Any] = None,
         parent_context: Optional[Any] = None,
+        start_time: Optional[int] = None,
     ) -> "Span":
         """
         Start a span and set it as current (context manager).
-        
+
         Args:
             name: Span name
             attributes: Optional attributes dictionary
             parent: Optional parent span
             parent_context: Optional parent span context
-        
+            start_time: Optional explicit start time in nanoseconds since epoch.
+
         Returns:
             Traccia Span instance (wraps OTel Span)
         """
@@ -176,6 +185,7 @@ class Tracer:
             attributes=attributes,
             parent=parent,
             parent_context=parent_context,
+            start_time=start_time,
         )
 
     def get_current_span(self) -> Optional["Span"]:

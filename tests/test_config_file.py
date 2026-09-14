@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 from traccia import config, init, stop_tracing
 
 
@@ -284,7 +285,7 @@ class TestConfigFromEnv(unittest.TestCase):
     
     def test_load_config_from_env_all_vars(self):
         """Test loading all supported environment variables."""
-        os.environ.update({
+        test_env = {
             "AGENT_DASHBOARD_API_KEY": "test-key",
             "AGENT_DASHBOARD_ENDPOINT": "http://test.com",
             "AGENT_DASHBOARD_SAMPLE_RATE": "0.9",
@@ -294,24 +295,30 @@ class TestConfigFromEnv(unittest.TestCase):
             "AGENT_DASHBOARD_ENABLE_CONSOLE_EXPORTER": "1",
             "AGENT_DASHBOARD_ENABLE_FILE_EXPORTER": "0",
             "AGENT_DASHBOARD_AUTO_START_TRACE": "true",
-        })
-        
-        try:
+        }
+        # Start from an environment with every Traccia-recognized var removed, so
+        # an ambient TRACCIA_* var (a developer .env pulled in by an earlier
+        # test's init() -> load_dotenv(), higher priority than the AGENT_DASHBOARD_*
+        # aliases) can't shadow what this test sets.
+        scrubbed = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {name for names in config.ENV_VAR_MAPPING.values() for name in names}
+        }
+        scrubbed.update(test_env)
+
+        with mock.patch.dict(os.environ, scrubbed, clear=True):
             env_config = config.load_config_from_env(flat=True)
-            
-            self.assertEqual(env_config["api_key"], "test-key")
-            self.assertEqual(env_config["endpoint"], "http://test.com")
-            self.assertEqual(env_config["sample_rate"], 0.9)
-            self.assertTrue(env_config["enable_patching"])
-            self.assertFalse(env_config["enable_token_counting"])
-            self.assertTrue(env_config["enable_costs"])
-            self.assertTrue(env_config["enable_console"])
-            self.assertFalse(env_config["enable_file"])
-            self.assertTrue(env_config["auto_start_trace"])
-        finally:
-            for key in list(os.environ.keys()):
-                if key.startswith("AGENT_DASHBOARD_"):
-                    del os.environ[key]
+
+        self.assertEqual(env_config["api_key"], "test-key")
+        self.assertEqual(env_config["endpoint"], "http://test.com")
+        self.assertEqual(env_config["sample_rate"], 0.9)
+        self.assertTrue(env_config["enable_patching"])
+        self.assertFalse(env_config["enable_token_counting"])
+        self.assertTrue(env_config["enable_costs"])
+        self.assertTrue(env_config["enable_console"])
+        self.assertFalse(env_config["enable_file"])
+        self.assertTrue(env_config["auto_start_trace"])
     
     def test_load_config_from_env_missing_vars(self):
         """Test that missing env vars don't appear in result."""

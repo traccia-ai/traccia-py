@@ -8,6 +8,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Optional
 
 from traccia.config import (
@@ -206,6 +207,93 @@ enable_span_logging = false
         return 1
 
 
+def _doctor_github_copilot(config) -> int:
+    """Print GitHub Copilot hooks integration status. Returns the issue count."""
+    print("\nGitHub Copilot hooks integration:")
+    issues = 0
+
+    inst = config.instrumentation
+    if not inst.github_copilot:
+        print("   Disabled (instrumentation.github_copilot = false)")
+        return 0
+    print("   Enabled")
+    print(
+        "   • Content capture: "
+        + ("on (redacted, size-capped)" if inst.github_copilot_capture_content else "off (metadata only)")
+    )
+
+    hook_locations = [
+        Path.cwd() / ".github" / "hooks" / "traccia.json",
+        Path.home() / ".copilot" / "hooks" / "traccia.json",
+    ]
+    installed = [p for p in hook_locations if p.exists()]
+    if installed:
+        for p in installed:
+            print(f"   • Hook config: {p}")
+    else:
+        print("   No hook config in the usual spots (run `traccia copilot install-hooks`)")
+        print(f"      Looked in: {hook_locations[0]}")
+        print(f"                 {hook_locations[1]}")
+
+    try:
+        from traccia.integrations.github_copilot import state as copilot_state
+
+        state_dir = copilot_state.default_state_dir()
+        buffered = copilot_state.list_sessions()
+        failed = copilot_state.list_failed()
+        stale = copilot_state.list_stale_claims(60.0)
+        print(f"   • Journal dir: {state_dir}")
+        if buffered:
+            print(
+                f"   • {len(buffered)} buffered session(s) awaiting flush "
+                "(`traccia copilot flush --all`)"
+            )
+        if stale:
+            print(f"   • {len(stale)} stale claim(s) from an interrupted flush")
+        if failed:
+            print(
+                f"   {len(failed)} session(s) parked in failed/ "
+                "(`traccia copilot flush --retry-failed`)"
+            )
+            issues += 1
+    except Exception as exc:  # noqa: BLE001 - doctor must never crash
+        print(f"   Could not inspect the session journal: {exc}")
+
+    _doctor_github_copilot_native_otel()
+    return issues
+
+
+def _doctor_github_copilot_native_otel() -> None:
+    """Report whether Copilot's own OpenTelemetry export is configured."""
+    print("\nGitHub Copilot native OpenTelemetry export (per-model-call spans):")
+
+    env_keys = [
+        "COPILOT_OTEL_ENABLED",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+    ]
+    env_set = [k for k in env_keys if os.getenv(k)]
+
+    vscode_settings_path = Path.cwd() / ".vscode" / "settings.json"
+    vscode_enabled = False
+    try:
+        if vscode_settings_path.exists():
+            data = json.loads(vscode_settings_path.read_text(encoding="utf-8"))
+            vscode_enabled = bool(
+                isinstance(data, dict)
+                and data.get("github.copilot.chat.otel.enabled")
+            )
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+    if env_set:
+        print(f"   • CLI env vars set: {', '.join(env_set)}")
+    if vscode_enabled:
+        print(f"   • Enabled in {vscode_settings_path}")
+    if not env_set and not vscode_enabled:
+        print("   Not configured (run `traccia copilot setup-otel`)")
+
+
 def _doctor(args) -> int:
     """Validate configuration and diagnose common issues."""
     print("🩺 Running Traccia configuration diagnostics...\n")
@@ -271,7 +359,11 @@ def _doctor(args) -> int:
     else:
         print(f"❌ {message}")
         issues_found += 1
-    
+
+    # 3b. GitHub Copilot hooks integration
+    if is_valid and config is not None:
+        issues_found += _doctor_github_copilot(config)
+
     # 4. Environment variable mapping reference
     print("\n📖 Environment Variable Reference:")
     print("   Common variables:")
@@ -527,6 +619,270 @@ def _pricing_clear(args) -> int:
     return 0
 
 
+def _copilot_install_hooks(args: argparse.Namespace) -> int:
+    """Write a GitHub Copilot hooks config that routes lifecycle events to Traccia.
+
+    See docs.github.com/en/copilot/reference/hooks-reference for the config
+    format this generates.
+    """
+    from traccia.integrations.github_copilot import mapping
+
+    if args.scope == "user":
+        target_dir = Path.home() / ".copilot" / "hooks"
+    else:
+        target_dir = Path.cwd() / ".github" / "hooks"
+    target_path = target_dir / "traccia.json"
+
+    if target_path.exists() and not args.force:
+        print(f"Hook config already exists at {target_path}", file=sys.stderr)
+        print("   Use --force to overwrite", file=sys.stderr)
+        return 1
+
+    # Repository configs are committed and may execute on another machine
+    # (notably Copilot cloud agent). Do not bake the installer host's absolute
+    # interpreter path into that config. User-level configs can safely retain
+    # the current interpreter, which is normally the installed Traccia env.
+    python_bin = args.python or (sys.executable if args.scope == "user" else "python")
+    # Copilot parses `command` as a shell string, so an interpreter path with a
+    # space (venvs under "C:\Program Files\...", "Application Support", etc.)
+    # must be quoted or it splits into "C:\Program" + "Files\...". Double quotes
+    # work for both POSIX sh and cmd.exe.
+    if " " in python_bin and not (python_bin.startswith('"') and python_bin.endswith('"')):
+        python_bin = f'"{python_bin}"'
+    events = sorted(mapping.ALL_KNOWN_EVENTS - mapping.IGNORED_EVENTS)
+    hook_config = {
+        "version": 1,
+        "disableAllHooks": False,
+        "hooks": {
+            event: [
+                {
+                    "type": "command",
+                    "command": f"{python_bin} -m traccia.integrations.github_copilot.hook {event}",
+                    "timeoutSec": 30,
+                    **(
+                        {"env": {"TRACCIA_GITHUB_COPILOT_SYNC_FLUSH": "1"}}
+                        if args.scope == "repo"
+                        else {}
+                    ),
+                }
+            ]
+            for event in events
+        },
+    }
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(hook_config, f, indent=2)
+            f.write("\n")
+    except OSError as exc:
+        print(f"Failed to write hook config: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote Copilot hook config to {target_path}")
+    print(f"   Registered events: {', '.join(events)}")
+    if args.scope == "repo":
+        print("   This must be committed and on the repository's default branch")
+        print("   for the GitHub-hosted coding agent to pick it up.")
+    print("\nNext: run `traccia doctor` and start a Copilot CLI session to verify.")
+    print("   Sessions are exported once they end; use `traccia copilot flush --all`")
+    print("   to recover any session that ended without a clean sessionEnd event.")
+    return 0
+
+
+def _write_settings_file(
+    target: Path, wanted: dict, force: bool, native_otel
+) -> Optional[int]:
+    """Merge `wanted` (a vscode-settings-shaped dict) into `target`'s JSON.
+
+    Shared by `--write-vscode` and `--write-managed-settings`, which differ
+    only in which file they touch -- both are the same
+    `github.copilot.chat.otel.*` key/value shape. Returns an exit code on
+    failure, None on success.
+    """
+    existing: dict = {}
+    if target.exists():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                raise ValueError("settings root is not an object")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(
+                f"Could not parse {target} ({exc}); merge the block above by hand.",
+                file=sys.stderr,
+            )
+            return 1
+    merged, changed = native_otel.merge_settings(existing, wanted, overwrite=force)
+    conflicts = [k for k in wanted if k in existing and existing[k] != wanted[k]]
+    if changed:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"Failed to write {target}: {exc}", file=sys.stderr)
+            return 1
+        print(f"Wrote {len(changed)} setting(s) to {target}: {', '.join(changed)}")
+    else:
+        print(f"{target} already up to date.")
+    remaining_conflicts = [k for k in conflicts if k not in changed]
+    if remaining_conflicts:
+        print(
+            f"Left {', '.join(remaining_conflicts)} as-is (already set "
+            "differently); re-run with --force to overwrite."
+        )
+    return None
+
+
+def _copilot_setup_otel(args: argparse.Namespace) -> int:
+    """Render (and optionally write) config that points Copilot's native
+    OpenTelemetry exporter at the Traccia ingest endpoint.
+
+    This is a separate pipeline from `install-hooks`: the hooks give
+    session/tool spans, the native exporter gives per-model-call spans
+    (model name, token counts, latency). Running both is expected.
+    """
+    from traccia.integrations.github_copilot import native_otel
+
+    if args.exporter_type == "file":
+        wanted = native_otel.file_exporter_vscode_settings(
+            args.outfile, args.capture_content, args.max_attribute_size_chars
+        )
+        if args.format in ("both", "vscode"):
+            print("VS Code -- merge into .vscode/settings.json:\n")
+            print(json.dumps(wanted, indent=2))
+            print()
+        if args.format in ("both", "env"):
+            print(
+                "note: the file exporter is VS Code-only; there is no Copilot "
+                "CLI env var equivalent. Use the CLI's own \"Chat: Export Agent "
+                "Traces DB\" / `dbSpanExporter` for offline CLI capture instead.",
+                file=sys.stderr,
+            )
+        print(
+            f"note: Traccia does not pick up {args.outfile} automatically -- "
+            "it's a local JSONL file for offline analysis or manual import.",
+            file=sys.stderr,
+        )
+        for target_path in filter(
+            None, [args.write_vscode and args.write_vscode_path, args.write_managed_settings]
+        ):
+            rc = _write_settings_file(Path(target_path), wanted, args.force, native_otel)
+            if rc is not None:
+                return rc
+        return 0
+
+    config = load_config(config_file=getattr(args, "config", None))
+    copilot_default_endpoint = DEFAULT_OTLP_TRACE_ENDPOINT.replace(
+        "/v2/traces", "/v1/traces"
+    )
+    endpoint = args.endpoint or config.tracing.endpoint or copilot_default_endpoint
+    api_key = args.api_key or config.tracing.api_key
+    for pair in args.resource_attribute or []:
+        if "=" not in pair:
+            print(f"--resource-attribute must be KEY=VALUE, got: {pair!r}", file=sys.stderr)
+            return 1
+    resource_attributes = dict(
+        pair.split("=", 1) for pair in (args.resource_attribute or [])
+    )
+    cfg = native_otel.resolve(
+        endpoint,
+        api_key,
+        args.capture_content,
+        max_attribute_size_chars=args.max_attribute_size_chars,
+        service_name=args.service_name,
+        resource_attributes=resource_attributes or None,
+    )
+
+    show_vscode = args.format in ("both", "vscode")
+    show_env = args.format in ("both", "env")
+
+    if cfg.needs_collector:
+        print(
+            f"Traccia ingests at {cfg.endpoint}; Copilot only sends to "
+            "<base>/v1/traces. Run this OpenTelemetry Collector to bridge:\n"
+        )
+        print(native_otel.collector_config(cfg))
+        print(
+            f"\nThen Copilot points at {native_otel.LOCAL_COLLECTOR_ENDPOINT} "
+            "and the Collector forwards to Traccia.\n"
+        )
+
+    if show_vscode:
+        print("VS Code -- merge into .vscode/settings.json:\n")
+        print(json.dumps(native_otel.vscode_settings(cfg), indent=2))
+        print()
+
+    if show_env:
+        print("Copilot CLI -- export before launching `copilot`:\n")
+        for key, value in native_otel.env_vars(cfg).items():
+            print(f'export {key}="{value}"')
+        print()
+
+    wanted = native_otel.vscode_settings(cfg)
+
+    if args.write_vscode:
+        rc = _write_settings_file(Path(args.write_vscode_path), wanted, args.force, native_otel)
+        if rc is not None:
+            return rc
+
+    if args.write_managed_settings:
+        rc = _write_settings_file(
+            Path(args.write_managed_settings), wanted, args.force, native_otel
+        )
+        if rc is not None:
+            return rc
+
+    for note in native_otel.warnings(cfg):
+        print(f"note: {note}", file=sys.stderr)
+
+    print(
+        "\nRestart VS Code / your shell after applying. `chat`, `invoke_agent` "
+        "and `execute_tool` spans will arrive alongside the hook spans."
+    )
+    return 0
+
+
+def _copilot_flush(args: argparse.Namespace) -> int:
+    """Export any buffered GitHub Copilot session(s) and clear their local logs."""
+    from traccia.integrations.github_copilot.flush import (
+        flush_session,
+        flush_all,
+        retry_failed,
+    )
+
+    if args.session:
+        summary = flush_session(args.session)
+        if summary is None:
+            print(f"No buffered events found for session {args.session}.")
+            return 0
+        print(f"Flushed session {args.session}: {summary}")
+        return 0
+
+    if getattr(args, "retry_failed", False):
+        results = retry_failed()
+        if not results:
+            print("No failed Copilot session logs to retry.")
+            return 0
+        for name, summary in results.items():
+            print(f"Retried {name}: {summary}")
+        return 0
+
+    results = flush_all(
+        max_age_seconds=args.max_age_seconds,
+        include_active=getattr(args, "include_active", False),
+    )
+    if not results:
+        print(
+            "No eligible Copilot sessions to flush "
+            "(only sessions with a recorded sessionEnd are flushed by default; "
+            "use --max-age-seconds N to recover orphans, or --include-active)."
+        )
+        return 0
+    for session_id, summary in results.items():
+        print(f"Flushed session {session_id}: {summary}")
+    return 0
+
+
 def main(argv=None) -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -543,6 +899,9 @@ Examples:
   traccia pricing refresh          Download latest pricing (platform → upstream fallback)
   traccia pricing refresh --source upstream  Fetch directly from upstream, skip platform
   traccia pricing clear            Remove local cache, revert to bundled snapshot
+  traccia copilot install-hooks    Wire GitHub Copilot's hooks to Traccia
+  traccia copilot setup-otel       Route Copilot's native OTLP export to Traccia
+  traccia copilot flush --all      Export any buffered Copilot sessions now
 
 For more information, visit: https://github.com/traccia-ai/traccia
         """
@@ -634,6 +993,155 @@ For more information, visit: https://github.com/traccia-ai/traccia
         help="Delete local pricing cache (revert to bundled snapshot)",
     )
     pricing_clear_cmd.set_defaults(func=_pricing_clear)
+
+    # Copilot command
+    copilot = sub.add_parser(
+        "copilot",
+        help="GitHub Copilot hooks integration",
+        description="Wire GitHub Copilot's hooks to Traccia, and export buffered sessions",
+    )
+    copilot_sub = copilot.add_subparsers(dest="copilot_command", required=True)
+
+    copilot_install = copilot_sub.add_parser(
+        "install-hooks",
+        help="Write a Copilot hooks config that routes events to Traccia",
+        description=(
+            "Generate a GitHub Copilot hooks configuration file that invokes "
+            "`python -m traccia.integrations.github_copilot.hook <event>` for each "
+            "lifecycle event Traccia knows how to map to a span."
+        ),
+    )
+    copilot_install.add_argument(
+        "--scope",
+        choices=["repo", "user"],
+        default="repo",
+        help=(
+            "repo: write .github/hooks/traccia.json (must be committed to the default "
+            "branch for the cloud coding agent to see it). user: write "
+            "~/.copilot/hooks/traccia.json (Copilot CLI only). Default: repo."
+        ),
+    )
+    copilot_install.add_argument("--force", action="store_true", help="Overwrite existing hook config")
+    copilot_install.add_argument(
+        "--python",
+        help="Python interpreter to invoke in the generated hook command (default: current interpreter)",
+    )
+    copilot_install.set_defaults(func=_copilot_install_hooks)
+
+    copilot_otel = copilot_sub.add_parser(
+        "setup-otel",
+        help="Point Copilot's native OpenTelemetry exporter at Traccia",
+        description=(
+            "Render the VS Code settings and CLI environment variables that make "
+            "GitHub Copilot export its own OpenTelemetry spans (per-model-call "
+            "`chat`, `invoke_agent`, `execute_tool`) to the Traccia ingest "
+            "endpoint. This is a separate pipeline from `install-hooks`: hooks "
+            "give session/tool spans, this gives model name, token counts and "
+            "per-call latency. Run both."
+        ),
+    )
+    copilot_otel.add_argument("--endpoint", help="Override the traces endpoint URL")
+    copilot_otel.add_argument("--api-key", help="Override the API key")
+    copilot_otel.add_argument(
+        "--capture-content",
+        action="store_true",
+        help="Enable prompt/response capture (Copilot does NOT redact it)",
+    )
+    copilot_otel.add_argument(
+        "--format",
+        choices=["both", "vscode", "env"],
+        default="both",
+        help="Which config form(s) to print (default: both)",
+    )
+    copilot_otel.add_argument(
+        "--write-vscode",
+        action="store_true",
+        help="Merge the OTLP keys into .vscode/settings.json (other keys untouched)",
+    )
+    copilot_otel.add_argument(
+        "--write-vscode-path",
+        default=str(Path.cwd() / ".vscode" / "settings.json"),
+        help="Path for --write-vscode (default: ./.vscode/settings.json)",
+    )
+    copilot_otel.add_argument(
+        "--force",
+        action="store_true",
+        help="With --write-vscode/--write-managed-settings, overwrite keys already set differently",
+    )
+    copilot_otel.add_argument(
+        "--write-managed-settings",
+        help=(
+            "Also merge the OTLP keys into an enterprise managed-settings.json "
+            "at this path (same key shape as .vscode/settings.json; you supply "
+            "the path since its OS-managed location varies by deployment)"
+        ),
+    )
+    copilot_otel.add_argument(
+        "--max-attribute-size-chars",
+        type=int,
+        help="Set github.copilot.chat.otel.maxAttributeSizeChars (truncate long span attributes)",
+    )
+    copilot_otel.add_argument(
+        "--service-name",
+        help="Emit OTEL_SERVICE_NAME for the Copilot CLI env block",
+    )
+    copilot_otel.add_argument(
+        "--resource-attribute",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Add a key=value pair to OTEL_RESOURCE_ATTRIBUTES for the Copilot CLI env block (repeatable)",
+    )
+    copilot_otel.add_argument(
+        "--exporter-type",
+        choices=["otlp-http", "file"],
+        default="otlp-http",
+        help=(
+            "otlp-http (default) routes through Traccia/a Collector; file "
+            "writes Copilot's spans to a local JSONL file instead, for "
+            "environments with no reachable Collector endpoint"
+        ),
+    )
+    copilot_otel.add_argument(
+        "--outfile",
+        default=".vscode/copilot-otel-traces.jsonl",
+        help="Output path for --exporter-type file (default: .vscode/copilot-otel-traces.jsonl)",
+    )
+    copilot_otel.set_defaults(func=_copilot_setup_otel)
+
+    copilot_flush = copilot_sub.add_parser(
+        "flush",
+        help="Export buffered Copilot session(s) now",
+        description=(
+            "Materialize and export Traccia spans for GitHub Copilot session(s) buffered "
+            "locally. Normally triggered automatically on sessionEnd. `--all` flushes only "
+            "sessions that have a recorded sessionEnd; add `--max-age-seconds N` to also "
+            "recover orphaned sessions (ended abnormally, idle at least N seconds) or "
+            "`--include-active` to force every buffered session. Sessions whose export "
+            "fails are parked under failed/ and can be replayed with `--retry-failed`."
+        ),
+    )
+    copilot_flush_group = copilot_flush.add_mutually_exclusive_group(required=True)
+    copilot_flush_group.add_argument("--session", help="Flush a single session id")
+    copilot_flush_group.add_argument(
+        "--all", action="store_true", help="Flush every eligible buffered session"
+    )
+    copilot_flush_group.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Re-attempt export for sessions parked under failed/ after a prior export error",
+    )
+    copilot_flush.add_argument(
+        "--max-age-seconds",
+        type=float,
+        default=None,
+        help="With --all, also flush sessions with no sessionEnd that have been idle at least this long",
+    )
+    copilot_flush.add_argument(
+        "--include-active",
+        action="store_true",
+        help="With --all, also flush sessions that appear still active (no sessionEnd yet)",
+    )
+    copilot_flush.set_defaults(func=_copilot_flush)
 
     args = parser.parse_args(argv)
     return args.func(args)

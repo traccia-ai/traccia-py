@@ -351,6 +351,8 @@ def start_tracing(
     max_block_ms: int = 100,  # Rate limiting block time
     openai_agents: Optional[bool] = None,  # Auto-install OpenAI Agents integration
     crewai: Optional[bool] = None,  # Auto-install CrewAI integration
+    github_copilot: Optional[bool] = None,  # Enable GitHub Copilot hooks integration
+    github_copilot_capture_content: Optional[bool] = None,  # Capture tool/prompt content from Copilot hooks (redacted)
     guardrail_heuristics: Optional[bool] = None,  # Tier C heuristic guardrail detection (default True)
     enable_metrics: bool = True,  # Enable metrics
     metrics_endpoint: Optional[str] = None,  # Metrics endpoint
@@ -754,8 +756,13 @@ def start_tracing(
     if _init_method is None:
         _init_method = "start_tracing"
 
-    # Auto-install framework integrations (OpenAI Agents, CrewAI, etc.)
-    _install_integrations(openai_agents_flag=openai_agents, crewai_flag=crewai)
+    # Auto-install framework integrations (OpenAI Agents, CrewAI, GitHub Copilot, etc.)
+    _install_integrations(
+        openai_agents_flag=openai_agents,
+        crewai_flag=crewai,
+        github_copilot_flag=github_copilot,
+        github_copilot_capture_content_flag=github_copilot_capture_content,
+    )
 
     return provider
 
@@ -780,18 +787,27 @@ def _flush_and_shutdown_metrics(flush_timeout: Optional[float] = None) -> None:
         pass  # don't fail process shutdown
 
 
-def force_flush(flush_timeout: Optional[float] = None) -> None:
+def force_flush(flush_timeout: Optional[float] = None) -> bool:
     """
     Flush pending spans (and optionally metrics) without shutting down the tracer provider.
     Safe to call after each run when using init-once for parallel runs. Does not call
     stop_tracing() or shutdown any provider.
+
+    Returns True if the span provider reported a successful flush, False if it
+    timed out, errored, or no provider is active. Metrics-flush outcome does not
+    affect the return value. Callers that don't care may ignore it (prior
+    behavior returned None).
     """
+    span_flush_ok = False
     try:
         provider = _get_provider()
         timeout = flush_timeout if flush_timeout is not None else 5.0
-        provider.force_flush(timeout=timeout)
+        result = provider.force_flush(timeout=timeout)
+        # Older provider implementations return None; treat that as "no signal,
+        # assume ok" so this doesn't regress existing callers.
+        span_flush_ok = True if result is None else bool(result)
     except Exception:
-        pass
+        span_flush_ok = False
     try:
         from opentelemetry import metrics as otel_metrics
         mp = otel_metrics.get_meter_provider()
@@ -800,6 +816,7 @@ def force_flush(flush_timeout: Optional[float] = None) -> None:
             mp.force_flush(timeout_millis=timeout_ms)
     except Exception:
         pass
+    return span_flush_ok
 
 
 def stop_tracing(flush_timeout: Optional[float] = None) -> None:
@@ -1089,6 +1106,8 @@ def _initialize_metrics(
 def _install_integrations(
     openai_agents_flag: Optional[bool],
     crewai_flag: Optional[bool],
+    github_copilot_flag: Optional[bool] = None,
+    github_copilot_capture_content_flag: Optional[bool] = None,
 ) -> None:
     """
     Auto-install framework integrations so that init() and start_tracing()
@@ -1128,4 +1147,22 @@ def _install_integrations(
             install_crewai(enabled=True)
         except Exception:
             # CrewAI not installed or error during install, skip silently
+            pass
+
+    # Determine GitHub Copilot hooks enablement: explicit flag > runtime config > default True
+    copilot_enabled = True
+    if _rc is not None:
+        copilot_enabled = _rc.get_config_value("github_copilot", True)
+    if github_copilot_flag is not None:
+        copilot_enabled = bool(github_copilot_flag)
+
+    if copilot_enabled:
+        try:
+            from traccia.integrations.github_copilot import install as install_github_copilot
+            install_github_copilot(
+                enabled=True,
+                capture_content=github_copilot_capture_content_flag,
+            )
+        except Exception:
+            # Error during install, skip silently
             pass

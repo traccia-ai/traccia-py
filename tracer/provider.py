@@ -125,17 +125,27 @@ class TracerProvider:
         """Get the current sampler."""
         return self.sampler
 
-    def force_flush(self, timeout: Optional[float] = None) -> None:
-        """Force flush all processors."""
+    def force_flush(self, timeout: Optional[float] = None) -> bool:
+        """Force flush all processors.
+
+        Returns True if the underlying OTel provider reports that every span
+        processor flushed within the timeout, False otherwise. Enrichment
+        processor failures are swallowed (they don't export) and don't affect
+        the return value.
+        """
         # Flush OTel processors
-        self._otel_provider.force_flush(timeout_millis=int(timeout * 1000) if timeout else 30000)
-        
+        ok = self._otel_provider.force_flush(
+            timeout_millis=int(timeout * 1000) if timeout else 30000
+        )
+
         # Flush Traccia enrichment processors
         for processor in self._enrichment_processors:
             try:
                 processor.force_flush(timeout=timeout)
             except Exception:
                 pass
+
+        return bool(ok)
 
     def shutdown(self) -> None:
         """Shutdown the provider and all processors."""

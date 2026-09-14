@@ -246,6 +246,53 @@ init(crewai=False)  # Explicit parameter
 # OR in traccia.toml under [instrumentation]: crewai = false
 ```
 
+### GitHub Copilot
+
+GitHub Copilot (CLI and the cloud coding agent) runs as its own external process, not Python code you import - so unlike the integrations above, it uses [Copilot's hooks](https://docs.github.com/en/copilot/reference/hooks-reference): Traccia registers gets invoked at lifecycle events (session start/end, each tool call, subagent runs) and turns them into Traccia spans.
+
+```bash
+pip install traccia   # no extra required
+traccia copilot install-hooks           # writes .github/hooks/traccia.json
+# or: traccia copilot install-hooks --scope user   (Copilot CLI only, not repo-specific)
+```
+
+That's it - no code changes to your app. Run a Copilot CLI session and traces appear under the `github_copilot.session` span, exported through whatever exporter your `traccia.toml`/env vars already configure.
+
+Repository hooks also support cloud-agent jobs when the cloud runtime has Traccia installed and the exporter endpoint is allowlisted. Sessions are exported once they end (`sessionEnd`); recover any that didn't end cleanly with `traccia copilot flush --all`.
+
+**What gets captured**: session id, tool calls (`github_copilot.tool.<name>`, with real start/end timestamps reconstructed from the hook events), subagent runs, and errors - by default as **metadata only** (tool names, byte lengths, status), matching Copilot's own default-off content capture. Set `github_copilot_capture_content = true` (or `TRACCIA_GITHUB_COPILOT_CAPTURE_CONTENT=1`) to additionally capture (still redacted) tool arguments/results and prompt text.
+
+**Per-model-call data (model name, token counts, latency)**: hooks never see model
+calls, so this comes from a second, parallel pipeline - Copilot's own built-in
+OpenTelemetry exporter, which emits `chat` (one span per model call), `invoke_agent`
+and `execute_tool` spans following the GenAI conventions. `traccia copilot setup-otel`
+renders the VS Code settings and CLI env vars that point that exporter at your
+configured Traccia endpoint:
+
+```bash
+traccia copilot setup-otel                 # print VS Code + CLI config
+traccia copilot setup-otel --write-vscode  # merge the keys into ./.vscode/settings.json
+```
+
+Run it alongside `install-hooks`; the two pipelines correlate on session id and git metadata.
+
+Copilot's exporter uses standard OTLP HTTP signal paths: `/v1/traces` and
+`/v1/metrics`. The Traccia platform supports these paths directly, so
+`setup-otel` uses `https://api.traccia.ai/v1/traces` by default and no Collector
+is required. For a custom endpoint that does not provide standard `/v1` signal
+paths, `setup-otel` renders an OpenTelemetry Collector bridge instead. Export
+`OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <api-key>"` before launching
+VS Code or Copilot CLI so the exporter can authenticate. CLI terminal traces
+arrive as their own root spans under service `github-copilot`.
+
+**Configuration**: Auto-enabled by default. To disable:
+
+```python
+init(github_copilot=False)  # Explicit parameter
+# OR set environment variable: TRACCIA_GITHUB_COPILOT=false
+# OR in traccia.toml under [instrumentation]: github_copilot = false
+```
+
 ---
 
 ## 🛡️ Guardrail Detection
@@ -729,6 +776,28 @@ traccia pricing refresh --source upstream
 
 # Remove local cache — reverts to the bundled snapshot shipped with the SDK
 traccia pricing clear
+```
+
+### `traccia copilot`
+
+Wire up and manage the [GitHub Copilot hooks integration](#github-copilot):
+
+```bash
+# Register Traccia's hook script with Copilot for this repo
+traccia copilot install-hooks
+
+# Register for your Copilot CLI user profile instead (not repo-specific)
+traccia copilot install-hooks --scope user
+
+# Point Copilot's own OpenTelemetry exporter at Traccia for per-model-call spans
+traccia copilot setup-otel                 # print VS Code + CLI config
+traccia copilot setup-otel --write-vscode  # merge into ./.vscode/settings.json
+
+# Recover any session that ended without a clean sessionEnd event
+traccia copilot flush --all
+
+# Flush one specific session id
+traccia copilot flush --session <id>
 ```
 
 ---
@@ -1234,6 +1303,8 @@ Application Code (@observe)
 - **`traccia.integrations.*`**: AI/agent framework integrations.
   - Adapters that plug into higher-level frameworks via their official extension points (e.g., LangChain callbacks).
   - Work at the level of chains, tools, agents, and workflows rather than raw HTTP or SDK calls.
+  - `github_copilot` is the odd one out here: Copilot is an external, non-Python process, so
+    there's no framework object to plug into. It uses Copilot's own hooks mechanism instead.
 
 ---
 

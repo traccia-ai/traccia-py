@@ -73,6 +73,7 @@ packages = [
     "traccia.integrations.langchain",
     "traccia.integrations.openai_agents",
     "traccia.integrations.crewai",
+    "traccia.integrations.github_copilot",
     "traccia.processors",
     "traccia.guardrails",
     "traccia.governance",
