@@ -33,14 +33,18 @@ class Span:
         otel_span: OTelSpan,
         tracer: "Tracer",
         parent_span_id: Optional[str] = None,
+        start_time_ns: Optional[int] = None,
     ) -> None:
         """
         Initialize span wrapper.
-        
+
         Args:
             otel_span: OpenTelemetry Span instance
-            tracer: Traccia Tracer instance  
+            tracer: Traccia Tracer instance
             parent_span_id: Parent span ID (hex string, for compatibility)
+            start_time_ns: Explicit start time in nanoseconds since epoch, if the
+                underlying OTel span was started with one (see Tracer.start_span).
+                Defaults to now, matching prior behavior.
         """
         self._otel_span = otel_span
         self.tracer = tracer
@@ -68,7 +72,7 @@ class Span:
         
         # Expose span properties for processor access
         self.name = getattr(otel_span, 'name', 'unknown')
-        self.start_time_ns = time.time_ns()
+        self.start_time_ns = start_time_ns if start_time_ns is not None else time.time_ns()
         self.end_time_ns: Optional[int] = None
         
         # Status
@@ -215,17 +219,22 @@ class Span:
         except Exception:
             pass
 
-    def end(self) -> None:
+    def end(self, end_time: Optional[int] = None) -> None:
         """
         End the span.
-        
+
         Enrichment processors run BEFORE span.end() (span is still mutable).
         Export processors run AFTER span.end() (OTel handles this automatically).
+
+        Args:
+            end_time: Optional explicit end time in nanoseconds since epoch.
+                Defaults to now, matching prior behavior. Use when replaying
+                externally-timestamped events.
         """
         if self._ended:
             return
-        
-        self.end_time_ns = time.time_ns()
+
+        self.end_time_ns = end_time if end_time is not None else time.time_ns()
         if self.status == SpanStatus.UNSET:
             self.status = SpanStatus.OK
             # Set status on OTel span as well
