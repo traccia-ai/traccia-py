@@ -1246,7 +1246,7 @@ Contributions are welcome! Whether it's bug fixes, new features, documentation i
 1. **Fork the repository**
 2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
 3. **Make your changes** and add tests
-4. **Run tests**: `pytest traccia/tests/`
+4. **Run tests**: `pytest tests/`
 5. **Lint your code**: `ruff check traccia/`
 6. **Commit**: `git commit -m "Add amazing feature"`
 7. **Push**: `git push origin feature/amazing-feature`
@@ -1267,10 +1267,10 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e ".[dev]"
 
 # Run tests
-pytest traccia/tests/ -v
+pytest tests/ -v
 
 # Run with coverage
-pytest traccia/tests/ --cov=traccia --cov-report=html
+pytest tests/ --cov=traccia --cov-report=html
 ```
 
 ### Code Style
