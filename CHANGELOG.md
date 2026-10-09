@@ -9,7 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [0.1.32] - 2026-10-08
 
 ### Added
+ HEAD
 - `ApprovalPending` is raised when Refund Guard or Purchase Guard holds a tool for a person. It is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pending_tool_result()` is a normal tool result for frameworks that retry raised errors
+
+- Auto-instrumentation for `google.genai.models.Models.generate_content` in `instrumentation/gemini.py`, populating token usage, completion text, duration, and cost metadata
+2568759 (feat: instrument google.genai models.generate_content)
 - Local cost estimates price `llm.usage.cache_read_tokens` and `llm.usage.cache_write_tokens` at the model's cache read and cache write rates from the pricing snapshot. `llm.usage.prompt_tokens` is treated as uncached input
 - `llm.pricing.cache_fallback` is set to `true` when a model has no cache rate and those tokens were priced at the input rate
 - `compute_cost_detail()` in `traccia.processors.cost_engine` returns the cost and whether a cache fallback was used

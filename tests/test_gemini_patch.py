@@ -305,3 +305,43 @@ def test_async_call_populates_span(monkeypatch, fake_tracer):
     assert resp.output_text == "The capital of France is Paris."
     span = fake_tracer.spans[-1]
     assert span.attributes["llm.usage.total_tokens"] == 24
+
+
+def test_generate_content_sync_call_populates_span(monkeypatch, fake_tracer):
+    pytest.importorskip("google.genai")
+    from google.genai.models import Models
+
+    fake_response = types.SimpleNamespace(
+        text="Generated content response",
+        usage_metadata=types.SimpleNamespace(
+            prompt_token_count=10,
+            candidates_token_count=20,
+            thoughts_token_count=5,
+            total_token_count=35,
+        ),
+        model_version="gemini-2.5-flash",
+    )
+
+    def fake_generate_content(self, model, contents, **kwargs):
+        return fake_response
+
+    monkeypatch.setattr(Models, "generate_content", fake_generate_content)
+
+    assert patch_gemini() is True
+
+    models = object.__new__(Models)
+    resp = models.generate_content(model="gemini-2.5-flash", contents="Tell me a joke")
+
+    assert resp.text == "Generated content response"
+    span = fake_tracer.spans[-1]
+    assert span.attributes["llm.vendor"] == "google_gemini"
+    assert span.attributes["llm.model"] == "gemini-2.5-flash"
+    assert span.attributes["llm.prompt"] == "Tell me a joke"
+    assert span.attributes["llm.completion"] == "Generated content response"
+    assert span.attributes["llm.usage.prompt_tokens"] == 10
+    assert span.attributes["llm.usage.completion_tokens"] == 20
+    assert span.attributes["llm.usage.thought_tokens"] == 5
+    assert span.attributes["llm.usage.total_tokens"] == 35
+    assert span.attributes["llm.usage.prompt_source"] == "provider_usage"
+    assert span.attributes["llm.usage.completion_source"] == "provider_usage"
+    assert span.attributes["llm.usage.source"] == "provider_usage"

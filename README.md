@@ -91,6 +91,8 @@ text = generate_text("Write a haiku about Python")
 
 ### Gemini (google-genai)
 
+Auto-patches `google-genai` SDK calls. Synchronous `client.models.generate_content(...)` calls are also automatically traced with token usage, prompt/completion text, duration, and cost metadata.
+
 ```python
 from traccia import init
 from google import genai
