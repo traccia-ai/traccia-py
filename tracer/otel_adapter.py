@@ -540,17 +540,25 @@ class TracciaTracerProviderAdapter:
                 # Processors should not crash tracing
                 continue
     
-    def force_flush(self, timeout: Optional[float] = None) -> None:
-        """Force flush all processors."""
+    def force_flush(self, timeout: Optional[float] = None) -> bool:
+        """Force flush all processors.
+
+        Returns True if the underlying OTel provider reports a successful flush
+        of every span processor within the timeout, False otherwise.
+        """
         # Flush OTel provider
-        self._otel_provider.force_flush(timeout_millis=int(timeout * 1000) if timeout else 30000)
-        
+        ok = self._otel_provider.force_flush(
+            timeout_millis=int(timeout * 1000) if timeout else 30000
+        )
+
         # Flush Traccia processors
         for processor in list(self._span_processors):
             try:
                 processor.force_flush(timeout=timeout)
             except Exception:
                 continue
+
+        return bool(ok)
     
     def shutdown(self) -> None:
         """Shutdown the provider and all processors."""
