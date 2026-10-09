@@ -10,6 +10,7 @@ from traccia.instrumentation.openai import patch_openai, patch_openai_responses
 from traccia.instrumentation.anthropic import patch_anthropic
 from traccia.instrumentation.gemini import patch_gemini
 from traccia.instrumentation.requests import patch_requests
+from traccia.instrumentation.groq import patch_groq
 from traccia.instrumentation.http_client import inject_headers as inject_http_headers
 from traccia.instrumentation.http_server import extract_parent_context, start_server_span
 from traccia.instrumentation.fastapi import install_http_middleware
@@ -21,6 +22,7 @@ __all__ = [
     "patch_anthropic",
     "patch_gemini",
     "patch_requests",
+    "patch_groq",
     "inject_http_headers",
     "extract_parent_context",
     "start_server_span",

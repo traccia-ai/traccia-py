@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read, closed, or dropped, and records the full completion, token usage, and cost
+
 ## [0.1.32] - 2026-10-08
 
 ### Added
