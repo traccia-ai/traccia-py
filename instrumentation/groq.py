@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -196,7 +198,7 @@ def _record_failure(
     except Exception:
         pass
     span.record_exception(exc)
-    span.set_status(SpanStatus.ERROR, str(exc))
+    span.set_status(SpanStatus.ERROR, str(exc) or type(exc).__name__)
     try:
         from traccia.metrics.recorder import get_metrics_recorder
 
@@ -221,11 +223,17 @@ class _StreamState:
         model: Optional[str],
         t0: float,
         decision: Optional[Dict[str, Any]],
+        ctx: contextvars.Context,
     ) -> None:
         self.span, self.model, self.t0, self.decision = span, model, t0, decision
+        # The context of the create() call: agent identity, pep_enabled and this span
+        # as the current span. Finishing inside it settles and records metrics for the
+        # agent that made the call, wherever and whenever the stream is consumed.
+        self.ctx = ctx
         self.parts: List[str] = []
         self.resp_model = self.usage = self.reason = None
         self.done = False
+        self._lock = threading.Lock()
 
     def on_chunk(self, chunk: Any) -> None:
         """Collect content, finish reason and usage from one ChatCompletionChunk."""
@@ -248,9 +256,17 @@ class _StreamState:
 
     def finish(self, exc: Optional[BaseException] = None) -> None:
         """Record what was streamed (or *exc*) and end the span; later calls do nothing."""
-        if self.done:
-            return
-        self.done = True
+        with self._lock:
+            if self.done:
+                return
+            self.done = True
+        try:
+            self.ctx.run(self._finish, exc)
+        except RuntimeError:
+            # The context is already entered on this thread; finish in place.
+            self._finish(exc)
+
+    def _finish(self, exc: Optional[BaseException]) -> None:
         try:
             if exc is not None:
                 _record_failure(self.span, exc, self.decision, self.model)
@@ -286,7 +302,7 @@ class _SyncStream:
         except StopIteration:
             self._state.finish()
             raise
-        except Exception as exc:
+        except BaseException as exc:  # includes KeyboardInterrupt mid-stream
             self._state.finish(exc)
             raise
         self._state.on_chunk(chunk)
@@ -331,7 +347,7 @@ class _AsyncStream:
         except StopAsyncIteration:
             self._state.finish()
             raise
-        except Exception as exc:
+        except BaseException as exc:  # includes asyncio.CancelledError
             self._state.finish(exc)
             raise
         self._state.on_chunk(chunk)
@@ -384,13 +400,16 @@ def _wrap_sync(create_fn: Callable) -> Callable:
             resp = create_fn(self, *args, **kwargs)
             if kwargs.get("stream") is True:
                 span.set_attribute("llm.streaming", True)
-                return _SyncStream(
-                    resp, _StreamState(span, kwargs.get("model"), t0, decision)
+                state = _StreamState(
+                    span, kwargs.get("model"), t0, decision, contextvars.copy_context()
                 )
+                return _SyncStream(resp, state)
             _record_response(span, resp, kwargs.get("model"), t0, decision)
             span.end()
             return resp
-        except Exception as exc:
+        except BaseException as exc:
+            # BaseException, not Exception: asyncio.CancelledError and KeyboardInterrupt
+            # must also end the span and release the governance reservation.
             _record_failure(span, exc, decision, kwargs.get("model"))
             span.end()
             raise
@@ -424,13 +443,16 @@ def _wrap_async(create_fn: Callable) -> Callable:
             resp = await create_fn(self, *args, **kwargs)
             if kwargs.get("stream") is True:
                 span.set_attribute("llm.streaming", True)
-                return _AsyncStream(
-                    resp, _StreamState(span, kwargs.get("model"), t0, decision)
+                state = _StreamState(
+                    span, kwargs.get("model"), t0, decision, contextvars.copy_context()
                 )
+                return _AsyncStream(resp, state)
             _record_response(span, resp, kwargs.get("model"), t0, decision)
             span.end()
             return resp
-        except Exception as exc:
+        except BaseException as exc:
+            # BaseException, not Exception: asyncio.CancelledError and KeyboardInterrupt
+            # must also end the span and release the governance reservation.
             _record_failure(span, exc, decision, kwargs.get("model"))
             span.end()
             raise

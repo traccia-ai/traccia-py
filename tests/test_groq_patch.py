@@ -13,16 +13,19 @@ import sys
 import types
 
 import pytest
-from opentelemetry.trace import INVALID_SPAN_CONTEXT
+from opentelemetry.trace import INVALID_SPAN_CONTEXT, NonRecordingSpan
 
 import instrumentation.groq as groq_mod
 from traccia.tracer.span import SpanStatus
 from instrumentation.groq import patch_groq
 
 
-# Fakes: a tracer/span pair that records attributes and how often end() was called
-class FakeSpan:
+# Fakes: a tracer/span pair that records attributes and how often end() was called.
+# FakeSpan is an OTel span so opentelemetry.trace.get_current_span() returns it
+# while it is pushed as the current span.
+class FakeSpan(NonRecordingSpan):
     def __init__(self):
+        super().__init__(INVALID_SPAN_CONTEXT)
         self.attributes, self.exception, self.status = {}, None, None
         self.end_count = 0
 
@@ -588,3 +591,179 @@ def test_stream_error_releases_reservation(monkeypatch, fake_tracer, pep):
     with pytest.raises(RuntimeError):
         list(S().create(model="m", messages=MSGS, stream=True))
     assert calls["finish"] == [({"effect": "allow", "id": "d1"}, {"release": True})]
+
+
+# Streaming: settlement identity and cancellation
+@pytest.fixture
+def settle_spy(monkeypatch):
+    """Allow every call and record the agent, PEP flag and current span each settle sees."""
+    from opentelemetry import trace as otel_trace
+
+    from traccia import runtime_config
+    import traccia.governance.pep as pep_mod
+
+    seen = []
+
+    def spy(decision, **kw):
+        seen.append(
+            {
+                "agent": runtime_config.get_agent_id(),
+                "pep": runtime_config.pep_enabled(),
+                "span": otel_trace.get_current_span(),
+                "kw": kw,
+            }
+        )
+
+    monkeypatch.setattr(pep_mod, "finish_llm_call", spy)
+    monkeypatch.setattr(
+        pep_mod, "check_policy", lambda **kw: {"effect": "allow", "id": "d1"}
+    )
+    return seen
+
+
+def test_stream_settles_for_creating_agent(monkeypatch, fake_tracer, settle_spy):
+    from traccia import runtime_config
+    import traccia.metrics.recorder as rec_mod
+
+    metrics = {}
+
+    class Rec:
+        def record_token_usage(self, **kw):
+            metrics["agent"] = kw["attributes"].get("agent.id")
+
+        def record_duration(self, d, **kw):
+            pass
+
+        def record_cost(self, c, **kw):
+            pass
+
+    monkeypatch.setattr(rec_mod, "get_metrics_recorder", lambda: Rec())
+    S, _ = _install_streaming(monkeypatch)
+    with runtime_config.run_identity(agent_id="agent-a", pep_enabled=True):
+        stream = S().create(model="llama-3.3-70b-versatile", messages=MSGS, stream=True)
+    with runtime_config.run_identity(agent_id="agent-b", pep_enabled=False):
+        list(stream)
+
+    assert len(settle_spy) == 1
+    assert settle_spy[0]["agent"] == "agent-a"
+    assert settle_spy[0]["pep"] is True
+    assert settle_spy[0]["span"] is fake_tracer.spans[-1]
+    assert metrics["agent"] == "agent-a"
+
+
+def test_stream_consumed_after_context_exit_still_settles(
+    monkeypatch, fake_tracer, settle_spy
+):
+    from traccia import runtime_config
+
+    S, _ = _install_streaming(monkeypatch)
+    with runtime_config.run_identity(agent_id="agent-a", pep_enabled=True):
+        stream = S().create(model="llama-3.3-70b-versatile", messages=MSGS, stream=True)
+    list(stream)  # no run identity is active here
+    assert [s["agent"] for s in settle_spy] == ["agent-a"]
+    assert settle_spy[0]["kw"]["actual_usd"] > 0
+
+
+def test_async_stream_consumed_in_other_task_settles_for_creating_agent(
+    monkeypatch, fake_tracer, settle_spy
+):
+    from traccia import runtime_config
+
+    _, A = _install_streaming(monkeypatch)
+
+    async def run():
+        with runtime_config.run_identity(agent_id="agent-a", pep_enabled=True):
+            stream = await A().create(model="m", messages=MSGS, stream=True)
+
+        async def consume():
+            with runtime_config.run_identity(agent_id="agent-b"):
+                return [c async for c in stream]
+
+        await asyncio.create_task(consume())
+
+    asyncio.run(run())
+    assert [s["agent"] for s in settle_spy] == ["agent-a"]
+    assert settle_spy[0]["span"] is fake_tracer.spans[-1]
+
+
+def test_async_cancel_during_create_ends_span_and_releases(
+    monkeypatch, fake_tracer, pep
+):
+    pep_mod, calls = pep
+    monkeypatch.setattr(
+        pep_mod, "check_policy", lambda **kw: {"effect": "allow", "id": "d1"}
+    )
+    S, A = _make_classes()
+
+    async def slow(self, **kw):
+        await asyncio.sleep(10)
+
+    A.create = slow
+    _install_sdk(monkeypatch, S, A)
+    patch_groq()
+
+    async def run():
+        task = asyncio.create_task(A().create(model="m", messages=MSGS))
+        await asyncio.sleep(0)  # let the call start and block on the provider
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    span = fake_tracer.spans[-1]
+    assert span.end_count == 1
+    assert span.status == (SpanStatus.ERROR, "CancelledError")
+    assert calls["finish"] == [({"effect": "allow", "id": "d1"}, {"release": True})]
+
+
+def test_async_cancel_during_stream_iteration_ends_span_and_releases(
+    monkeypatch, fake_tracer, pep
+):
+    pep_mod, calls = pep
+    monkeypatch.setattr(
+        pep_mod, "check_policy", lambda **kw: {"effect": "allow", "id": "d1"}
+    )
+
+    class HangingAsyncStream(FakeAsyncStream):
+        async def __anext__(self):
+            if self._chunks:
+                return self._chunks.pop(0)
+            await asyncio.sleep(10)  # the next chunk never arrives
+
+    S, A = _make_classes()
+
+    async def create(self, **kw):
+        return HangingAsyncStream(CHUNKS[:1])
+
+    A.create = create
+    _install_sdk(monkeypatch, S, A)
+    patch_groq()
+
+    async def run():
+        stream = await A().create(model="m", messages=MSGS, stream=True)
+
+        async def consume():
+            async for _ in stream:
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    span = fake_tracer.spans[-1]
+    assert span.end_count == 1
+    assert span.status[0] == SpanStatus.ERROR
+    assert calls["finish"] == [({"effect": "allow", "id": "d1"}, {"release": True})]
+
+
+def test_keyboard_interrupt_mid_stream_ends_span(monkeypatch, fake_tracer):
+    S, _ = _install_streaming(monkeypatch, CHUNKS[:1], KeyboardInterrupt())
+    stream = S().create(model="m", messages=MSGS, stream=True)
+    with pytest.raises(KeyboardInterrupt):
+        list(stream)
+    span = fake_tracer.spans[-1]
+    assert span.end_count == 1
+    assert span.status == (SpanStatus.ERROR, "KeyboardInterrupt")
