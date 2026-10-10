@@ -3,8 +3,8 @@ Tests for traccia.pricing_matcher.match_model.
 
 The cases in fixtures/pricing_match_cases.json are shared with
 traccia-dashboard-service, which keeps an identical copy of the matcher; both repos
-must pass all of them. Tests below the fixture cover behaviour the fixture cannot
-express (empty input, tables without _provider, index caching, the bundled snapshot).
+must pass all of them. Tests below the fixture cover empty input, tables without
+_provider, the index cache, and the bundled snapshot.
 """
 
 import json
@@ -36,7 +36,7 @@ def test_shared_case(case):
 
 def test_match_reports_provider():
     assert match_model("openai/gpt-oss-120b", TABLE, "groq") == PriceMatch(
-        "groq/openai/gpt-oss-120b", "alias", "groq"
+        "groq/openai/gpt-oss-120b", "base", "groq"
     )
 
 
@@ -58,26 +58,26 @@ class TestTablesWithoutProvider:
         "xai/grok-4.7": {"prompt": 3},
     }
 
-    def test_longest_key_wins(self):
+    def test_dated_name_finds_its_model(self):
         assert match_model("gpt-4o-mini-2024-07-18", self.TABLE).key == "gpt-4o-mini"
 
     def test_first_segment_is_provider(self):
         assert match_model("grok-4.7", self.TABLE, "xai") == PriceMatch(
-            "xai/grok-4.7", "alias", "xai"
+            "xai/grok-4.7", "base", "xai"
         )
 
 
 class TestIndexCache:
     def test_table_growth_is_seen(self):
         table = {"gpt-4o": {"prompt": 1}}
-        assert match_model("o9-mega", table) is None
+        assert match_model("acme/o9-mega", table) is None
         table["o9-mega"] = {"prompt": 2}
-        assert match_model("o9-mega", table).key == "o9-mega"
+        assert match_model("acme/o9-mega", table).key == "o9-mega"
 
     def test_distinct_tables(self):
         a, b = {"model-a": {}}, {"model-b": {}}
-        assert match_model("model-a", a).key == "model-a"
-        assert match_model("model-a", b) is None
+        assert match_model("acme/model-a", a).key == "model-a"
+        assert match_model("acme/model-a", b) is None
 
 
 # Real model ids as each SDK reports them, against the bundled LiteLLM snapshot.
@@ -91,7 +91,7 @@ BUNDLED_CASES = [
         "groq",
         "groq/meta-llama/llama-4-scout-17b-16e-instruct",
     ),
-    ("moonshotai/kimi-k2-instruct", "groq", "groq/moonshotai/kimi-k2-instruct-0905"),
+    ("moonshotai/kimi-k2-instruct-0905", "groq", "groq/moonshotai/kimi-k2-instruct-0905"),
     ("qwen/qwen3-32b", "groq", "groq/qwen/qwen3-32b"),
     ("gpt-4o", "openai", "gpt-4o"),
     ("gpt-4o-2099-01-01", "openai", "gpt-4o"),

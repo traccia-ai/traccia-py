@@ -7,14 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- `traccia.pricing_matcher.match_model()` picks the pricing key for a model name. It strips provider and SDK prefixes (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`, Bedrock `us.` and `-v2:0`), falls back to the undated model, and prefers the price of the span's `llm.vendor` when several providers list the model. The platform uses an identical copy, so local and platform costs agree
-- Spans record `llm.pricing.match_kind` (`exact`, `alias`, `undated`, or `prefix`) and `llm.pricing.provider` next to `llm.pricing.model_key`
+- `traccia.pricing_matcher.match_model()` picks the pricing key for a model name. Names match on their base name, without the provider path (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`), a Bedrock region (`us.`), or a date or `-latest` suffix. When several providers list the model, the span's `llm.vendor` price wins, then the shortest key. The platform uses an identical copy, so local and platform costs agree
+- Spans record `llm.pricing.match_kind` (`exact` or `base`) and `llm.pricing.provider` next to `llm.pricing.model_key`
 - `compute_cost()`, `compute_cost_detail()`, and `match_pricing_model_key()` take an optional `vendor`
 
 ### Fixed
 - Model ids with an organisation prefix (`openai/gpt-oss-120b`, `qwen/qwen3-32b` on Groq) get a cost. They previously matched no pricing key
 - A model listed by several providers is priced at the calling provider's rate. `gpt-oss-120b` on a Groq span took `azure_ai/gpt-oss-120b` and now takes `groq/openai/gpt-oss-120b`
-- Prefix matching only cuts at `-`, `@`, or `:`, so `gpt-4` can never price `gpt-4.1-…` or `gpt-4o-…`
+
+### Changed
+- No more prefix matching: a model name that matches no pricing key after the steps above (for example a fine-tuned `gpt-4o-mini-ft-…`) gets no cost instead of the price of a model whose name it starts with
 
 ## [0.1.32] - 2026-10-08
 

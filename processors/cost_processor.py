@@ -53,7 +53,7 @@ class CostAnnotatingProcessor(SpanProcessor):
       - llm.usage.source             — where token counts came from (was llm.cost.source)
       - llm.pricing.source           — which pricing layer was used
       - llm.pricing.model_key        — the pricing table key matched
-      - llm.pricing.match_kind       — how it matched: exact | alias | undated | prefix
+      - llm.pricing.match_kind       — how it matched: exact | base
       - llm.pricing.provider         — pricing provider of the matched key, when known
       - llm.pricing.generated_at     — ISO timestamp of the pricing snapshot
       - llm.pricing.age_days         — integer age of the snapshot in days

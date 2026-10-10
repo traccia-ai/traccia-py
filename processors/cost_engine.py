@@ -112,7 +112,7 @@ def compute_cost_detail(
     provider's own price when several pricing keys fit the model name.
 
     The result also names the matched key (``model_key``), how it matched
-    (``match_kind``: exact | alias | undated | prefix) and its ``provider``.
+    (``match_kind``: exact | base) and its ``provider``.
     """
     table = pricing_table if pricing_table is not None else BUNDLED_PRICING
     matched = match_model(model, table, vendor)

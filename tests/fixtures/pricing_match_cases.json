@@ -22,32 +22,31 @@
   },
   "cases": [
     {"model": "gpt-4o", "vendor": null, "key": "gpt-4o", "kind": "exact"},
-    {"model": "GPT-4o", "vendor": "openai", "key": "gpt-4o", "kind": "exact"},
+    {"model": "GPT-4o", "vendor": "openai", "key": "gpt-4o", "kind": "base"},
     {"model": "definitely-not-a-model", "vendor": null, "key": null, "kind": null},
     {"model": "gpt-4x", "vendor": null, "key": null, "kind": null},
 
-    {"model": "llama-3.3-70b-versatile", "vendor": "groq", "key": "groq/llama-3.3-70b-versatile", "kind": "alias"},
-    {"model": "openai/gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "alias"},
-    {"model": "openai/gpt-oss-120b", "vendor": "together_ai", "key": "together_ai/openai/gpt-oss-120b", "kind": "alias"},
-    {"model": "gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "alias"},
-    {"model": "models/gemini-2.5-flash", "vendor": null, "key": "gemini-2.5-flash", "kind": "alias"},
-    {"model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "vendor": null, "key": "anthropic.claude-3-5-sonnet-20241022-v2:0", "kind": "alias"},
-    {"model": "gemma2-9b-it", "vendor": null, "key": "fireworks_ai/accounts/fireworks/models/gemma2-9b-it", "kind": "alias"},
-    {"model": "grok-4.7", "vendor": null, "key": "xai/grok-4.7", "kind": "alias"},
-    {"model": "grok-4", "vendor": "xai", "key": "xai/grok-4", "kind": "alias"},
+    {"model": "llama-3.3-70b-versatile", "vendor": "groq", "key": "groq/llama-3.3-70b-versatile", "kind": "base"},
+    {"model": "openai/gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "openai/gpt-oss-120b", "vendor": "together_ai", "key": "together_ai/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "models/gemini-2.5-flash", "vendor": null, "key": "gemini-2.5-flash", "kind": "base"},
+    {"model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "vendor": null, "key": "anthropic.claude-3-5-sonnet-20241022-v2:0", "kind": "base"},
+    {"model": "gemma2-9b-it", "vendor": null, "key": "fireworks_ai/accounts/fireworks/models/gemma2-9b-it", "kind": "base"},
+    {"model": "grok-4.7", "vendor": null, "key": "xai/grok-4.7", "kind": "base"},
+    {"model": "grok-4", "vendor": "xai", "key": "xai/grok-4", "kind": "base"},
 
-    {"model": "gpt-4o-2099-01-01", "vendor": "openai", "key": "gpt-4o", "kind": "undated"},
-    {"model": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "key": "claude-sonnet-4-5", "kind": "undated"},
-    {"model": "gpt-4.1-2099-01-01", "vendor": null, "key": "gpt-4.1", "kind": "undated"},
+    {"model": "gpt-4o-2099-01-01", "vendor": "openai", "key": "gpt-4o", "kind": "base"},
+    {"model": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "key": "claude-sonnet-4-5", "kind": "base"},
+    {"model": "gpt-4.1-2099-01-01", "vendor": null, "key": "gpt-4.1", "kind": "base"},
+    {"model": "claude-3-5-sonnet-20241022", "vendor": null, "key": "vercel_ai_gateway/anthropic/claude-3-5-sonnet-20241022", "kind": "base"},
 
-    {"model": "moonshotai/kimi-k2-instruct", "vendor": "groq", "key": "groq/moonshotai/kimi-k2-instruct-0905", "kind": "undated"},
-    {"model": "moonshotai/kimi-k2-instruct", "vendor": null, "key": "wandb/moonshotai/Kimi-K2-Instruct", "kind": "alias"},
+    {"model": "moonshotai/kimi-k2-instruct", "vendor": null, "key": "wandb/moonshotai/Kimi-K2-Instruct", "kind": "base"},
     {"model": "gpt-4o", "vendor": "langchain", "key": "gpt-4o", "kind": "exact"},
-    {"model": "llama-3.3-70b-versatile", "vendor": "openai", "key": "groq/llama-3.3-70b-versatile", "kind": "alias"},
-    {"model": "claude-3-5-sonnet-20241022", "vendor": null, "key": "anthropic.claude-3-5-sonnet-20241022-v2:0", "kind": "alias"},
+    {"model": "llama-3.3-70b-versatile", "vendor": "openai", "key": "groq/llama-3.3-70b-versatile", "kind": "base"},
 
-    {"model": "gpt-4-turbo-preview-custom", "vendor": null, "key": "gpt-4-turbo", "kind": "prefix"},
-    {"model": "gpt-4o-mini-ft-abc", "vendor": null, "key": "gpt-4o-mini", "kind": "prefix"},
-    {"model": "gpt-4.1-nano-x", "vendor": null, "key": "gpt-4.1", "kind": "prefix"}
+    {"model": "gpt-4-turbo-preview-custom", "vendor": null, "key": null, "kind": null},
+    {"model": "gpt-4o-mini-ft-abc", "vendor": null, "key": null, "kind": null},
+    {"model": "gpt-4.1-nano-x", "vendor": null, "key": null, "kind": null}
   ]
 }
