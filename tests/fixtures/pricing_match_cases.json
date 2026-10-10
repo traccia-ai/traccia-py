@@ -1,0 +1,52 @@
+{
+  "_comment": "Shared by traccia-py (tests/test_pricing_matcher.py) and traccia-dashboard-service (tests/test_pricing_matcher.py). Both copies of the pricing matcher must pass every case. Keep the two files identical.",
+  "table": {
+    "gpt-4": {"prompt": 0.03, "completion": 0.06, "_provider": "openai"},
+    "gpt-4o": {"prompt": 0.0025, "completion": 0.01, "_provider": "openai"},
+    "gpt-4o-mini": {"prompt": 0.00015, "completion": 0.0006, "_provider": "openai"},
+    "gpt-4-turbo": {"prompt": 0.01, "completion": 0.03, "_provider": "openai"},
+    "gpt-4.1": {"prompt": 0.002, "completion": 0.008, "_provider": "openai"},
+    "claude-sonnet-4-5": {"prompt": 0.003, "completion": 0.015, "_provider": "anthropic"},
+    "anthropic.claude-3-5-sonnet-20241022-v2:0": {"prompt": 0.003, "completion": 0.015, "_provider": "bedrock"},
+    "vercel_ai_gateway/anthropic/claude-3-5-sonnet-20241022": {"prompt": 0.004, "completion": 0.016, "_provider": "vercel_ai_gateway"},
+    "gemini-2.5-flash": {"prompt": 0.0003, "completion": 0.0025, "_provider": "vertex_ai-language-models"},
+    "gemini/gemini-2.5-flash": {"prompt": 0.0003, "completion": 0.0025, "_provider": "gemini"},
+    "groq/llama-3.3-70b-versatile": {"prompt": 0.00059, "completion": 0.00079, "_provider": "groq"},
+    "groq/openai/gpt-oss-120b": {"prompt": 0.00015, "completion": 0.0006, "_provider": "groq"},
+    "together_ai/openai/gpt-oss-120b": {"prompt": 0.0002, "completion": 0.0006, "_provider": "together_ai"},
+    "groq/moonshotai/kimi-k2-instruct-0905": {"prompt": 0.001, "completion": 0.003, "_provider": "groq"},
+    "wandb/moonshotai/Kimi-K2-Instruct": {"prompt": 0.0006, "completion": 0.0025, "_provider": "wandb"},
+    "fireworks_ai/accounts/fireworks/models/gemma2-9b-it": {"prompt": 0.0002, "completion": 0.0002, "_provider": "fireworks_ai"},
+    "xai/grok-4": {"prompt": 0.003, "completion": 0.015, "_provider": "xai"},
+    "xai/grok-4.7": {"prompt": 0.004, "completion": 0.02, "_provider": "xai"}
+  },
+  "cases": [
+    {"model": "gpt-4o", "vendor": null, "key": "gpt-4o", "kind": "exact"},
+    {"model": "GPT-4o", "vendor": "openai", "key": "gpt-4o", "kind": "base"},
+    {"model": "definitely-not-a-model", "vendor": null, "key": null, "kind": null},
+    {"model": "gpt-4x", "vendor": null, "key": null, "kind": null},
+
+    {"model": "llama-3.3-70b-versatile", "vendor": "groq", "key": "groq/llama-3.3-70b-versatile", "kind": "base"},
+    {"model": "openai/gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "openai/gpt-oss-120b", "vendor": "together_ai", "key": "together_ai/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "gpt-oss-120b", "vendor": "groq", "key": "groq/openai/gpt-oss-120b", "kind": "base"},
+    {"model": "models/gemini-2.5-flash", "vendor": null, "key": "gemini-2.5-flash", "kind": "base"},
+    {"model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0", "vendor": null, "key": "anthropic.claude-3-5-sonnet-20241022-v2:0", "kind": "base"},
+    {"model": "gemma2-9b-it", "vendor": null, "key": "fireworks_ai/accounts/fireworks/models/gemma2-9b-it", "kind": "base"},
+    {"model": "grok-4.7", "vendor": null, "key": "xai/grok-4.7", "kind": "base"},
+    {"model": "grok-4", "vendor": "xai", "key": "xai/grok-4", "kind": "base"},
+
+    {"model": "gpt-4o-2099-01-01", "vendor": "openai", "key": "gpt-4o", "kind": "base"},
+    {"model": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "key": "claude-sonnet-4-5", "kind": "base"},
+    {"model": "gpt-4.1-2099-01-01", "vendor": null, "key": "gpt-4.1", "kind": "base"},
+    {"model": "claude-3-5-sonnet-20241022", "vendor": null, "key": "vercel_ai_gateway/anthropic/claude-3-5-sonnet-20241022", "kind": "base"},
+
+    {"model": "moonshotai/kimi-k2-instruct", "vendor": null, "key": "wandb/moonshotai/Kimi-K2-Instruct", "kind": "base"},
+    {"model": "gpt-4o", "vendor": "langchain", "key": "gpt-4o", "kind": "exact"},
+    {"model": "llama-3.3-70b-versatile", "vendor": "openai", "key": "groq/llama-3.3-70b-versatile", "kind": "base"},
+
+    {"model": "gpt-4-turbo-preview-custom", "vendor": null, "key": null, "kind": null},
+    {"model": "gpt-4o-mini-ft-abc", "vendor": null, "key": null, "kind": null},
+    {"model": "gpt-4.1-nano-x", "vendor": null, "key": null, "kind": null}
+  ]
+}

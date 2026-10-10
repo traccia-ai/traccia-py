@@ -58,13 +58,12 @@ class TestCostEngine:
         cost = compute_cost("definitely-not-a-model", 100, 100, pricing_table={})
         assert cost is None
 
-    def test_prefix_longer_key_wins(self):
-        """gpt-4o should not be matched by gpt-4 key when gpt-4o exists."""
+    def test_no_prefix_guess(self):
+        """gpt-4o-mini is a different model from gpt-4 and gpt-4o, so it gets no price."""
         from traccia.processors.cost_engine import _lookup_price
         table = {"gpt-4": {"prompt": 0.03, "completion": 0.06},
                  "gpt-4o": {"prompt": 0.005, "completion": 0.015}}
-        key, _ = _lookup_price("gpt-4o-mini", table)
-        assert key == "gpt-4o"
+        assert _lookup_price("gpt-4o-mini", table) is None
 
     def test_provider_prefixed_grok_matches_short_model(self):
         from traccia.processors.cost_engine import _lookup_price
@@ -231,6 +230,35 @@ class TestCostAnnotatingProcessor:
         assert "llm.pricing.snapshot_version" in span.attributes
         assert "llm.pricing.source" in span.attributes
         assert span.attributes["llm.pricing.source"] == "local_cache"
+
+    def test_match_attributes_set(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "llm.model": "gpt-4o-2099-01-01",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert span.attributes["llm.pricing.model_key"] == "gpt-4o"
+        assert span.attributes["llm.pricing.match_kind"] == "base"
+
+    def test_vendor_selects_provider_price(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+        table = {
+            "together_ai/openai/gpt-oss-120b": {"prompt": 1.0, "completion": 1.0, "_provider": "together_ai"},
+            "groq/openai/gpt-oss-120b": {"prompt": 0.1, "completion": 0.1, "_provider": "groq"},
+        }
+        proc = CostAnnotatingProcessor(pricing_table=table)
+        span = _FakeSpan({
+            "llm.vendor": "groq",
+            "llm.model": "openai/gpt-oss-120b",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 1000,
+        })
+        proc.on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(0.2)
+        assert span.attributes["llm.pricing.model_key"] == "groq/openai/gpt-oss-120b"
+        assert span.attributes["llm.pricing.provider"] == "groq"
 
     def test_llm_usage_source_set_and_alias(self):
         proc = self._make_processor()
