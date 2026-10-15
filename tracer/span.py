@@ -313,6 +313,15 @@ class Span:
         
         self._ended = True
 
+        # 4. The run is over once its local root span ends; drop its policy evidence.
+        if self.parent_span_id is None:
+            try:
+                from traccia.governance.evidence import forget_trace
+
+                forget_trace(self.context.trace_id)
+            except Exception:
+                pass
+
     # Context manager support
     def __enter__(self) -> "Span":
         """Enter context manager."""

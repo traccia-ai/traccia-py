@@ -223,7 +223,11 @@ def observe(
                     if inferred_type == "tool":
                         from traccia.governance.pep import remember_tool_result
 
-                        remember_tool_result(span_name, result)
+                        remember_tool_result(
+                            span_name,
+                            result,
+                            {k: v for k, v in bound.arguments.items() if k != "self"},
+                        )
                     _note_retrieval(span)
                     # For guardrail-typed spans: auto-set triggered from bool return value
                     # so developers don't need to manually call get_current_span().
@@ -296,7 +300,11 @@ def observe(
                     if inferred_type == "tool":
                         from traccia.governance.pep import remember_tool_result
 
-                        remember_tool_result(span_name, result)
+                        remember_tool_result(
+                            span_name,
+                            result,
+                            {k: v for k, v in bound.arguments.items() if k != "self"},
+                        )
                     _note_retrieval(span)
                     # For guardrail-typed spans: auto-set triggered from bool return value.
                     if inferred_type == "guardrail" and isinstance(result, bool):
