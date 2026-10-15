@@ -40,6 +40,9 @@ def govern(agent_id: Optional[str] = None, fail_open: bool = True, **observe_kwa
     Deny raises AgentBlockedError. Reshape may swap the model on the in-flight
     request. Observe/Warn in the dashboard still let the call proceed.
 
+    fail_open=False blocks the run, and every checked call inside it, when Traccia
+    cannot give a decision (missing credentials, HTTP error, timeout).
+
     Requires a Traccia account (API key + endpoint). Tracing-only or self-hosted
     setups should use @observe instead.
     """
@@ -60,7 +63,7 @@ def govern(agent_id: Optional[str] = None, fail_open: bool = True, **observe_kwa
             check_agent_status(aid, fail_open=fail_open)
 
         def _run_kwargs() -> dict:
-            kwargs: dict[str, Any] = {"pep_enabled": True}
+            kwargs: dict[str, Any] = {"pep_enabled": True, "pep_fail_open": fail_open}
             if override_id and str(override_id).strip():
                 kwargs["agent_id"] = str(override_id).strip()
             if agent_name:

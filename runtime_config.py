@@ -14,6 +14,7 @@ _run_env: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("tracci
 _run_tenant_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_tenant_id", default=None)
 _run_project_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_project_id", default=None)
 _run_pep_enabled: contextvars.ContextVar[bool] = contextvars.ContextVar("traccia_run_pep_enabled", default=False)
+_run_pep_fail_open: contextvars.ContextVar[bool] = contextvars.ContextVar("traccia_run_pep_fail_open", default=True)
 
 # Global runtime configuration state
 _config = {
@@ -147,6 +148,11 @@ def pep_enabled() -> bool:
     return bool(_run_pep_enabled.get())
 
 
+def pep_fail_open() -> bool:
+    """False when the current @govern run asked for fail-closed policy checks."""
+    return bool(_run_pep_fail_open.get())
+
+
 def set_debug(value: bool) -> None:
     _config["debug"] = value
 
@@ -202,6 +208,7 @@ def run_identity(
     tenant_id: Optional[str] = None,
     project_id: Optional[str] = None,
     pep_enabled: Optional[bool] = None,
+    pep_fail_open: Optional[bool] = None,
 ):
     """
     Context manager to set run-scoped agent identity for the current context (e.g. one request).
@@ -224,6 +231,8 @@ def run_identity(
             resets.append((_run_project_id, _run_project_id.set(project_id)))
         if pep_enabled is not None:
             resets.append((_run_pep_enabled, _run_pep_enabled.set(bool(pep_enabled))))
+        if pep_fail_open is not None:
+            resets.append((_run_pep_fail_open, _run_pep_fail_open.set(bool(pep_fail_open))))
         yield
     finally:
         for var, token in reversed(resets):

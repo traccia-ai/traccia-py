@@ -334,3 +334,54 @@ def test_llm_check_omits_prompt_and_does_not_invent_chunk_count():
                     assert body["context"]["retrieval"] == {"present": False}
                     assert "chunk_count" not in body["context"]["retrieval"]
 
+
+def _fail_closed():
+    return runtime_config.run_identity(agent_id="support", pep_enabled=True, pep_fail_open=False)
+
+
+def test_fail_closed_blocks_on_http_error():
+    with _fail_closed():
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.return_value = MagicMock(status_code=503, text="down")
+                with pytest.raises(AgentBlockedError) as exc:
+                    enforce_tool_call("issue_refund", {"amount": 80})
+                assert exc.value.reasons == ["check_http_error"]
+                assert "fail_open is False" in str(exc.value)
+
+
+def test_fail_closed_blocks_on_transport_error():
+    with _fail_closed():
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.side_effect = ConnectionError("refused")
+                with pytest.raises(AgentBlockedError) as exc:
+                    enforce_llm_call({"model": "gpt-4o"})
+                assert exc.value.reasons == ["check_error"]
+
+
+def test_fail_closed_blocks_without_credentials():
+    with _fail_closed():
+        with patch("traccia.governance.pep._credentials", return_value=(None, None)):
+            with pytest.raises(AgentBlockedError) as exc:
+                enforce_tool_call("search", {"q": "x"})
+            assert exc.value.reasons == ["missing_credentials"]
+
+
+def test_fail_open_is_the_default_on_transport_error():
+    with runtime_config.run_identity(agent_id="support", pep_enabled=True):
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.side_effect = ConnectionError("refused")
+                out = enforce_tool_call("search", {"q": "x"})
+                assert out["effect"] == "allow"
+                assert out["reasons"] == ["check_error"]
+
+
+def test_fail_closed_still_passes_a_real_allow():
+    decision = {"id": "dec-ok", "effect": "allow", "would_have": False, "reasons": []}
+    with _fail_closed():
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.return_value = MagicMock(status_code=200, json=lambda: decision)
+                assert enforce_tool_call("search", {"q": "x"})["id"] == "dec-ok"

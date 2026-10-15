@@ -242,6 +242,19 @@ def _customer_id(arguments: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _unresolved(reason: str, detail: str, *, warn: bool = True) -> Dict[str, Any]:
+    """No decision from Traccia. Allow, unless the @govern run is fail-closed."""
+    if not runtime_config.pep_fail_open():
+        logger.error("policy check could not complete (%s); blocking call (fail_open=False)", detail)
+        raise AgentBlockedError(
+            f"Policy check could not complete ({detail}). Blocking because fail_open is False.",
+            reasons=[reason],
+        )
+    if warn:
+        logger.warning("policy check could not complete (%s); allowing call", detail)
+    return {"effect": "allow", "would_have": False, "reasons": [reason]}
+
+
 def check_policy(
     *,
     action: Dict[str, Any],
@@ -251,10 +264,12 @@ def check_policy(
     """POST /api/v1/policy/check. Safe to call from custom tools; @govern uses this automatically."""
     api_key, endpoint = _credentials()
     if not api_key or not endpoint:
-        return {"effect": "allow", "would_have": False, "reasons": ["missing_credentials"]}
+        return _unresolved("missing_credentials", "Traccia API key or endpoint not set", warn=False)
     agent_id = _agent_id()
     if not agent_id:
-        return {"effect": "allow", "would_have": False, "reasons": ["missing_agent_id"]}
+        return _unresolved(
+            "missing_agent_id", "no agent_id on init, @govern, or TRACCIA_AGENT_ID", warn=False
+        )
     trace_id, span_id = _trace_ids()
     payload = {
         "principal": {"agent_id": agent_id},
@@ -278,16 +293,15 @@ def check_policy(
             timeout=2,
         )
         if response.status_code != 200:
-            logger.warning(
-                "policy check HTTP %s; allowing call (%s)",
-                response.status_code,
-                (response.text or "")[:180],
+            return _unresolved(
+                "check_http_error",
+                f"HTTP {response.status_code}: {(response.text or '')[:180]}",
             )
-            return {"effect": "allow", "would_have": False, "reasons": ["check_http_error"]}
         decision = response.json()
+    except AgentBlockedError:
+        raise
     except Exception as exc:
-        logger.warning("policy check failed: %s; allowing call", exc)
-        return {"effect": "allow", "would_have": False, "reasons": ["check_error"]}
+        return _unresolved("check_error", str(exc))
     _cache_budget(agent_id, decision.get("remaining_budget_usd"))
     _stamp_span(decision)
     if decision.get("would_have"):
