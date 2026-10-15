@@ -153,6 +153,7 @@ class AgentEnrichmentProcessor(SpanProcessor):
                         completion_tokens=int(completion_tokens or 0),
                         cache_read_tokens=int(cache_read_tokens or 0),
                         cache_write_tokens=int(cache_write_tokens or 0),
+                        vendor=attrs.get("llm.vendor"),
                     )
                     if cost is not None:
                         span.set_attribute("llm.cost.usd", cost)

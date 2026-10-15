@@ -14,7 +14,8 @@ from __future__ import annotations
 import importlib.resources
 import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -68,13 +69,79 @@ DEFAULT_PRICING = BUNDLED_PRICING
 # Model-name matching
 # ---------------------------------------------------------------------------
 
+# llm.vendor values set only by that provider's own SDK, which calls no other provider. Their
+# calls are priced only from that provider's entries, never from another provider's entry for
+# the same model name, which can be priced very differently. The platform's pricing matcher
+# applies the same rule.
+STRICT_VENDORS = frozenset({"groq"})
+
+_REGION = re.compile(r"^(?:us|eu|apac|au|ca|jp|global|us-gov)\.")
+_SUFFIX = re.compile(r"(?:-\d{4}-\d{2}-\d{2}|-\d{8}|-latest)$")
+
+
+def _name(name: str) -> str:
+    """Lower-cased, without the provider path or region; the date is kept."""
+    return _REGION.sub("", name.strip().lower().rsplit("/", 1)[-1])
+
+
+def _base_name(name: str) -> str:
+    return _SUFFIX.sub("", _name(name))
+
+
+def _strict_vendor(vendor: Optional[str]) -> Optional[str]:
+    v = str(vendor or "").strip().lower()
+    return v if v in STRICT_VENDORS else None
+
+
+def _in_vendor_family(key: str, entry: Any, vendor: str) -> bool:
+    """Whether the entry is the vendor's: its provider is the vendor, or a variant after "_"
+    or "-" (as the platform's matcher counts provider families)."""
+    provider = (entry.get("_provider") or entry.get("provider")) if isinstance(entry, dict) else None
+    if not provider and "/" in key:
+        provider = key.split("/", 1)[0]
+    p = str(provider or "").lower()
+    return p == vendor or p.startswith(vendor + "_") or p.startswith(vendor + "-")
+
+
+# The last table indexed for a vendor: (table, its size, vendor, base name -> keys).
+_vendor_index: Tuple[Any, int, Optional[str], Dict[str, List[str]]] = (None, 0, None, {})
+
+
+def _vendor_keys(table: Dict[str, Dict[str, Any]], vendor: str) -> Dict[str, List[str]]:
+    global _vendor_index
+    cached, size, cached_vendor, index = _vendor_index
+    if cached is table and size == len(table) and cached_vendor == vendor:
+        return index
+    index = {}
+    for key, entry in table.items():
+        if _in_vendor_family(key, entry, vendor):
+            index.setdefault(_base_name(key), []).append(key)
+    _vendor_index = (table, len(table), vendor, index)
+    return index
+
+
+def _lookup_vendor_price(
+    model: str, table: Dict[str, Dict[str, Any]], vendor: str
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """The vendor's own entry for *model*: a vendor key with the same base name (lower-cased,
+    without the provider path, a region, or a date or -latest suffix), the key for the exact
+    dated name first, then the shortest. None when the vendor has no such key."""
+    wanted = _name(str(model))
+    keys = _vendor_keys(table, vendor).get(_SUFFIX.sub("", wanted)) if wanted else None
+    if not keys:
+        return None
+    key = min(keys, key=lambda k: (_name(k) != wanted, len(k), k))
+    return key, table[key]
+
+
 def _lookup_price(
-    model: str, table: Dict[str, Dict[str, Any]]
+    model: str, table: Dict[str, Dict[str, Any]], vendor: Optional[str] = None
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
     Return (matched_key, price_dict) for a given model name.
 
-    Supports:
+    A call from a vendor in STRICT_VENDORS is priced only from that vendor's entries (see
+    _lookup_vendor_price). Otherwise the vendor is not used, and matching supports:
     - Exact match (case-sensitive)
     - Lowercase match
     - Longest-prefix match for version-suffixed names:
@@ -86,6 +153,9 @@ def _lookup_price(
     m = str(model).strip()
     if not m:
         return None
+    strict = _strict_vendor(vendor)
+    if strict:
+        return _lookup_vendor_price(m, table, strict)
 
     if m in table:
         return m, table[m]
@@ -117,11 +187,13 @@ def _lookup_price(
 
 
 def match_pricing_model_key(
-    model: str, pricing_table: Optional[Dict[str, Dict[str, Any]]] = None
+    model: str,
+    pricing_table: Optional[Dict[str, Dict[str, Any]]] = None,
+    vendor: Optional[str] = None,
 ) -> Optional[str]:
     """Return the pricing table key that would be used for *model*, if any."""
     table = pricing_table if pricing_table is not None else BUNDLED_PRICING
-    matched = _lookup_price(model, table)
+    matched = _lookup_price(model, table, vendor)
     if not matched:
         return None
     key, _ = matched
@@ -139,15 +211,17 @@ def compute_cost_detail(
     pricing_table: Optional[Dict[str, Dict[str, Any]]] = None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    vendor: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Price uncached input, cache read, cache write, and output.
 
     ``cached_prompt`` and ``cache_write`` come from the LiteLLM snapshot.
     When a cache rate is missing, that portion uses the input rate and
-    ``cache_fallback`` is true.
+    ``cache_fallback`` is true. *vendor* is the span's ``llm.vendor`` (see
+    STRICT_VENDORS).
     """
     table = pricing_table if pricing_table is not None else BUNDLED_PRICING
-    matched = _lookup_price(model, table)
+    matched = _lookup_price(model, table, vendor)
     if not matched:
         return None
     _, price = matched
@@ -176,6 +250,7 @@ def compute_cost(
     pricing_table: Optional[Dict[str, Dict[str, Any]]] = None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    vendor: Optional[str] = None,
 ) -> Optional[float]:
     """
     Estimate cost in USD for one LLM call.
@@ -187,6 +262,8 @@ def compute_cost(
         pricing_table: Optional pricing table to use; defaults to BUNDLED_PRICING.
         cache_read_tokens: Tokens served from cache.
         cache_write_tokens: Tokens written to cache.
+        vendor: The span's ``llm.vendor``; a vendor in STRICT_VENDORS is priced only
+            from its own entries.
 
     Returns:
         Estimated cost in USD rounded to 6 decimal places, or None if the
@@ -199,6 +276,7 @@ def compute_cost(
         pricing_table=pricing_table,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        vendor=vendor,
     )
     if detail is None:
         return None

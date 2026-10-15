@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
+import contextvars
 import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from typing import Any, Dict, Optional, Set
 
 from traccia.config import load_config
 from traccia.governance.policy import AgentBlockedError, ApprovalPending, _derive_base_url, _http_session
@@ -305,7 +308,27 @@ def check_policy(
     return decision
 
 
-def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, actual_usd: Optional[float] = None) -> None:
+def reserved_usd(decision: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The USD amount the policy check reserved for a call, if any."""
+    reserved = ((decision or {}).get("obligations") or {}).get("reserved_usd")
+    return reserved if isinstance(reserved, (int, float)) and not isinstance(reserved, bool) else None
+
+
+def settle_policy(
+    decision: Optional[Dict[str, Any]],
+    *,
+    release: bool = False,
+    actual_usd: Optional[float] = None,
+    model: Optional[str] = None,
+    vendor: Optional[str] = None,
+    input_tokens: Optional[float] = None,
+    output_tokens: Optional[float] = None,
+) -> None:
+    """Settle the call's reservation.
+
+    Without ``actual_usd`` the server prices the call from ``model``, ``vendor`` and the
+    token counts; with none of them it releases the reservation.
+    """
     if not decision:
         return
     reserved = (decision.get("obligations") or {}).get("reserved_usd")
@@ -327,6 +350,10 @@ def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, 
                 "reserved_usd": reserved,
                 "actual_usd": actual_usd,
                 "release": release,
+                "model": model,
+                "vendor": vendor,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
             },
             timeout=2,
         )
@@ -334,35 +361,86 @@ def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, 
         logger.debug("policy settle failed: %s", exc)
 
 
+# Tokens one image is counted as in a prompt estimate, in the range vision models charge for a
+# typical image. Image parts are counted by this, never by their (base64) URL.
+IMAGE_PROMPT_TOKENS = 1000
+_IMAGE_PART_TYPES = {"image_url", "image", "input_image"}
+
+
+def _get(obj: Any, key: str) -> Any:
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def _message_text(message: Any) -> tuple[str, int]:
+    """(text, image count) of one message: its content (a string or content parts) plus any
+    tool call arguments, which are part of the prompt when the conversation is sent back."""
+    if isinstance(message, str):
+        return message, 0
+    content = _get(message, "content")
+    texts = []
+    images = 0
+    if isinstance(content, str):
+        texts.append(content)
+    elif isinstance(content, (list, tuple)):
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+                continue
+            text = _get(part, "text")
+            if isinstance(text, str):
+                texts.append(text)
+            elif _get(part, "type") in _IMAGE_PART_TYPES:
+                images += 1
+    tool_calls = _get(message, "tool_calls")
+    if isinstance(tool_calls, (list, tuple)):
+        for call in tool_calls:
+            arguments = _get(_get(call, "function"), "arguments")
+            if isinstance(arguments, str):
+                texts.append(arguments)
+    return "".join(texts), images
+
+
 def _estimate_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
     try:
-        from traccia.processors.token_counter import estimate_tokens_from_text
+        from traccia.processors.token_counter import estimate_tokens_from_text_with_source
     except Exception:
-        estimate_tokens_from_text = None
+        estimate_tokens_from_text_with_source = None
     messages = kwargs.get("messages")
     text = kwargs.get("prompt") or kwargs.get("input")
     blob = ""
-    if isinstance(messages, list):
+    images = 0
+    if isinstance(messages, (list, tuple)):
         parts = []
         for item in messages:
-            if isinstance(item, dict):
-                parts.append(str(item.get("content") or ""))
-            else:
-                parts.append(str(item))
+            message_text, message_images = _message_text(item)
+            parts.append(message_text)
+            images += message_images
         blob = "\n".join(parts)
     elif isinstance(text, str):
         blob = text
+    image_tokens = images * IMAGE_PROMPT_TOKENS
     if not blob:
-        return None
-    if estimate_tokens_from_text:
+        return image_tokens or None
+    rough = max(len(blob) // 4, 1)
+    if estimate_tokens_from_text_with_source:
         try:
-            return int(estimate_tokens_from_text(blob))
+            count, source = estimate_tokens_from_text_with_source(blob)
+            if source == "estimated.tiktoken":
+                return int(count) + image_tokens
+            # Without tiktoken the counter splits on whitespace, which counts code, JSON or
+            # unspaced text as a handful of tokens; never estimate below characters / 4.
+            return max(int(count), rough) + image_tokens
         except Exception:
             pass
-    return max(len(blob) // 4, 1)
+    return rough + image_tokens
 
 
-def enforce_llm_call(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def estimate_prompt_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
+    """Rough prompt size in tokens, as sent with the policy check."""
+    return _estimate_tokens(kwargs)
+
+
+def enforce_llm_call(kwargs: Dict[str, Any], *, vendor: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not runtime_config.pep_enabled():
         return None
     model = kwargs.get("model")
@@ -374,6 +452,9 @@ def enforce_llm_call(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "input_tokens": _estimate_tokens(kwargs),
         "retrieval": _retrieval_context(trace_id),
     }
+    if vendor:
+        # Picks that provider's price when the model name alone is ambiguous.
+        context["vendor"] = vendor
     prompt = _prompt_context()
     if prompt:
         context["prompt"] = prompt
@@ -391,8 +472,67 @@ def enforce_llm_call(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return decision
 
 
-def finish_llm_call(decision: Optional[Dict[str, Any]], *, release: bool = False, actual_usd: Optional[float] = None) -> None:
-    settle_policy(decision, release=release, actual_usd=actual_usd)
+def finish_llm_call(
+    decision: Optional[Dict[str, Any]],
+    *,
+    release: bool = False,
+    actual_usd: Optional[float] = None,
+    model: Optional[str] = None,
+    vendor: Optional[str] = None,
+    input_tokens: Optional[float] = None,
+    output_tokens: Optional[float] = None,
+) -> None:
+    settle_policy(
+        decision,
+        release=release,
+        actual_usd=actual_usd,
+        model=model,
+        vendor=vendor,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+_settle_executor: Optional[ThreadPoolExecutor] = None
+_pending_settles: Set[Future] = set()
+_settle_lock = threading.Lock()
+
+
+def _settle_pool() -> ThreadPoolExecutor:
+    global _settle_executor
+    with _settle_lock:
+        if _settle_executor is None:
+            _settle_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="traccia-settle")
+            atexit.register(flush_pending_settles)
+        return _settle_executor
+
+
+def _settle_done(future: Future) -> None:
+    with _settle_lock:
+        _pending_settles.discard(future)
+
+
+def finish_llm_call_in_background(decision: Optional[Dict[str, Any]], **kwargs: Any) -> None:
+    """finish_llm_call() on a worker thread, so a slow policy server does not delay the caller.
+
+    Runs in a copy of the current context, so it settles for the agent (and span) that made
+    the call. flush_pending_settles() waits for it; it also runs at interpreter exit.
+    """
+    if reserved_usd(decision) is None:
+        return  # nothing was reserved, so there is nothing to settle
+    ctx = contextvars.copy_context()
+    future = _settle_pool().submit(ctx.run, finish_llm_call, decision, **kwargs)
+    with _settle_lock:
+        _pending_settles.add(future)
+    future.add_done_callback(_settle_done)
+
+
+def flush_pending_settles(timeout: Optional[float] = 10.0) -> None:
+    """Wait (up to ``timeout`` seconds) for every background settle started so far."""
+    with _settle_lock:
+        pending = list(_pending_settles)
+    if pending:
+        wait(pending, timeout=timeout)
 
 
 def enforce_tool_call(name: str, arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:

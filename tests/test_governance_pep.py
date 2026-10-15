@@ -334,3 +334,14 @@ def test_llm_check_omits_prompt_and_does_not_invent_chunk_count():
                     assert body["context"]["retrieval"] == {"present": False}
                     assert "chunk_count" not in body["context"]["retrieval"]
 
+
+def test_before_llm_sends_vendor_for_spend_cap():
+    decision = {"id": "dec-v", "effect": "allow", "obligations": {}}
+    with runtime_config.run_identity(agent_id="support", pep_enabled=True):
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.return_value = MagicMock(status_code=200, json=lambda: decision)
+                enforce_llm_call({"model": "gemini-2.0-flash-001"}, vendor="google_gemini")
+                body = session.post.call_args.kwargs["json"]
+                assert body["context"]["vendor"] == "google_gemini"
+

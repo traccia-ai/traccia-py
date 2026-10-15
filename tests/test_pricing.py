@@ -505,3 +505,87 @@ class TestCostResolver:
         for t in threads:
             t.join()
         assert errors == [], f"Thread safety errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Strict vendors: a Groq call is priced only from Groq's own entries
+# ---------------------------------------------------------------------------
+
+GROQ_TABLE = {
+    "ovhcloud/Qwen3-32B": {"prompt": 0.00008, "completion": 0.00023, "_provider": "ovhcloud"},
+    "groq/qwen/qwen3-32b": {"prompt": 0.00029, "completion": 0.00059, "_provider": "groq"},
+    "groq/openai/gpt-oss-120b": {"prompt": 0.00015, "completion": 0.0006, "cached_prompt": 0.000075, "_provider": "groq"},
+    "groq/openai/gpt-oss-120b-2025-08-05": {"prompt": 0.0001, "completion": 0.0005, "_provider": "groq"},
+    "fireworks_ai/accounts/fireworks/models/gemma2-9b-it": {"prompt": 0.0002, "completion": 0.0002, "_provider": "fireworks_ai"},
+    "kimi-k2": {"prompt": 0.001, "completion": 0.003, "_provider": "groq"},
+}
+
+
+class TestStrictVendorPricing:
+    def test_groq_model_is_priced_at_the_groq_key(self):
+        from traccia.processors.cost_engine import compute_cost, match_pricing_model_key
+
+        assert match_pricing_model_key("qwen/qwen3-32b", GROQ_TABLE, "groq") == "groq/qwen/qwen3-32b"
+        assert compute_cost("qwen/qwen3-32b", 1000, 1000, GROQ_TABLE, vendor="groq") == pytest.approx(0.00088)
+
+    def test_groq_model_never_takes_another_providers_price(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE) is not None
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE, "groq") is None
+
+    def test_entry_provider_counts_without_a_key_prefix(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2", GROQ_TABLE, "GROQ") == "kimi-k2"
+
+    def test_base_name_drops_a_date_and_the_exact_dated_key_wins(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("openai/gpt-oss-120b-20250101", GROQ_TABLE, "groq") == "groq/openai/gpt-oss-120b"
+        assert (
+            match_pricing_model_key("openai/gpt-oss-120b-2025-08-05", GROQ_TABLE, "groq")
+            == "groq/openai/gpt-oss-120b-2025-08-05"
+        )
+
+    def test_no_name_prefix_match(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2-instruct-0905", GROQ_TABLE, "groq") is None
+        assert match_pricing_model_key("openai/gpt-oss-120b-long", GROQ_TABLE, "groq") is None
+
+    def test_other_vendors_are_not_strict(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2", GROQ_TABLE, "openai") == "kimi-k2"
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE, "openai") is not None
+
+    def test_cost_processor_uses_the_span_vendor(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+
+        span = MagicMock()
+        span.attributes = {
+            "llm.vendor": "groq",
+            "llm.model": "openai/gpt-oss-120b",
+            "llm.usage.prompt_tokens": 200,
+            "llm.usage.cache_read_tokens": 800,
+            "llm.usage.completion_tokens": 0,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        CostAnnotatingProcessor(pricing_table=GROQ_TABLE).on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(0.00003 + 0.00006)
+        assert span.attributes["llm.pricing.model_key"] == "groq/openai/gpt-oss-120b"
+
+    def test_cost_processor_leaves_an_unpriced_groq_span(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+
+        span = MagicMock()
+        span.attributes = {
+            "llm.vendor": "groq",
+            "llm.model": "gemma2-9b-it",
+            "llm.usage.prompt_tokens": 100,
+            "llm.usage.completion_tokens": 50,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        CostAnnotatingProcessor(pricing_table=GROQ_TABLE).on_end(span)
+        assert "llm.cost.usd" not in span.attributes

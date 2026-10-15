@@ -110,6 +110,7 @@ class CostAnnotatingProcessor(SpanProcessor):
 
         if not model or prompt is None or completion is None:
             return
+        vendor = span.attributes.get("llm.vendor")
 
         detail = compute_cost_detail(
             model,
@@ -118,6 +119,7 @@ class CostAnnotatingProcessor(SpanProcessor):
             pricing_table=self.pricing_table,
             cache_read_tokens=int(cache_read or 0),
             cache_write_tokens=int(cache_write or 0),
+            vendor=vendor,
         )
         if detail is None:
             return
@@ -138,7 +140,7 @@ class CostAnnotatingProcessor(SpanProcessor):
 
         span.set_attribute("llm.pricing.source", self.pricing_source)
 
-        key = match_pricing_model_key(model, self.pricing_table)
+        key = match_pricing_model_key(model, self.pricing_table, vendor)
         if key:
             span.set_attribute("llm.pricing.model_key", key)
 

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read to the end, closed, or garbage collected. Read to the end, it records the full completion, token usage, and cost
+- A streamed call settles for the agent that made it, even if the stream is read under another `run_identity` or after it exits. Cancellation (`asyncio.CancelledError`) and `KeyboardInterrupt` end the span with an error and release the governance reservation
+- A stream that fails or is cancelled keeps the text received so far on its span. A stream dropped without being finished settles on a background thread, so garbage collection never blocks on the settle request
+- Streamed calls made through `with_raw_response` or `with_streaming_response` are traced: the stream returned by `.parse()` records the completion and token usage, and the span ends on `close()` if the stream is never parsed
+
 ## [0.1.32] - 2026-10-08
 
 ### Added

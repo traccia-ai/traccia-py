@@ -20,7 +20,7 @@ Framework-agnostic and built for **OpenAI Agents, LangGraph, CrewAI, and LLM app
 
 ### Observability & Tracing
 
-- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (google-genai), requests, and HTTP libraries
+- **Automatic Instrumentation**: Auto-patch OpenAI, Anthropic, Gemini (google-genai), Groq (groq), requests, and HTTP libraries
 - **Framework Integrations**: Support for LangChain, CrewAI, and OpenAI Agents SDK
 - **LLM-Aware Tracing**: Track tokens, costs, prompts, completions, and latency automatically
 - **OpenTelemetry Metrics**: Emit OTEL-compliant metrics for accurate token and cost tracking independent of sampling
@@ -103,6 +103,31 @@ response = client.interactions.create(
     input="Write a haiku about Python",
 )
 ```
+
+### Groq (groq)
+
+```python
+from traccia import init
+from groq import Groq
+
+init()  # Auto-patches groq (sync and async clients)
+
+client = Groq()
+response = client.chat.completions.create(
+    model="llama-3.3-70b-versatile",
+    messages=[{"role": "user", "content": "Write a haiku about Python"}],
+)
+
+# Streaming is traced too: the span stays open until the stream is read, closed, or dropped.
+for chunk in client.chat.completions.create(
+    model="llama-3.3-70b-versatile",
+    messages=[{"role": "user", "content": "Write a haiku about Python"}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+Each call gets an `llm.groq.chat.completions` span and goes through the Spend Cap. Settlement charges Groq's reported usage at Groq's own price (cached prompt tokens at the cached rate); a stream stopped or failed partway is charged an estimate of what it produced; a `with_streaming_response` call, whose body you read yourself, is charged its full reservation. `with_raw_response` works as before. Calls made to Groq through the OpenAI client (`base_url="https://api.groq.com/openai/v1"`) go through the OpenAI integration instead, so use the `groq` client for Groq.
 
 
 ### Load a versioned prompt
@@ -407,7 +432,7 @@ file_exporter_path = "traces.jsonl"
 reset_trace_file = false      # Reset file on initialization
 
 [instrumentation]
-enable_patching = true          # Auto-patch libraries (OpenAI, Anthropic, requests)
+enable_patching = true          # Auto-patch libraries (OpenAI, Anthropic, Gemini, Groq, requests)
 enable_token_counting = true    # Count tokens for LLM calls
 enable_costs = true             # Calculate costs
 openai_agents = true            # Auto-enable OpenAI Agents SDK integration
@@ -897,7 +922,7 @@ init(sample_rate=0.1)
 
 ### Token Counting & Cost Calculation
 
-Automatic for supported LLM providers (OpenAI, Anthropic):
+Automatic for supported LLM providers (OpenAI, Anthropic, Gemini, Groq):
 
 ```python
 @observe(as_type="llm")
@@ -937,7 +962,7 @@ Traccia automatically emits these metrics:
 | `gen_ai.agent.turns` | Counter | `1` | Agent turns |
 | `gen_ai.agent.execution_time` | Histogram | `s` | Agent execution time |
 
-**Attributes**: `gen_ai.system` (openai, anthropic), `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.agent.name`
+**Attributes**: `gen_ai.system` (openai, anthropic, google_gemini, groq), `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.agent.name`
 
 #### Configuration
 
@@ -1058,7 +1083,7 @@ Initialize the Traccia SDK. All parameters are optional; configuration is merged
 - `reset_trace_file` (bool): Clear file on init (default: False)
 
 *Instrumentation*
-- `enable_patching` (bool): Auto-patch OpenAI, Anthropic, requests (default: True)
+- `enable_patching` (bool): Auto-patch OpenAI, Anthropic, Gemini, Groq, requests (default: True)
 - `enable_token_counting` (bool): Count tokens (default: True)
 - `enable_costs` (bool): Calculate costs (default: True)
 - `pricing_override` (dict): Per-model pricing override — always wins over all other sources. See [Pricing](#pricing) section below.
@@ -1228,7 +1253,7 @@ Application Code (@observe)
 
 - **`traccia.instrumentation.*`**: Infrastructure and vendor instrumentation.
   - HTTP client/server helpers (including FastAPI middleware).
-  - Vendor SDK hooks and monkey patching (e.g., OpenAI, Anthropic, Gemini, `requests`).
+  - Vendor SDK hooks and monkey patching (e.g., OpenAI, Anthropic, Gemini, Groq, `requests`).
   - Decorators and utilities used for auto-instrumenting arbitrary functions.
 
 - **`traccia.integrations.*`**: AI/agent framework integrations.
