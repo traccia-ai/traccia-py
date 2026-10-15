@@ -233,7 +233,7 @@ def _build_sync_wrapper(original_create):
             try:
                 from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                decision = enforce_llm_call(kwargs)
+                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                 resp = original_create(self, *args, **kwargs)
                 if not streaming:
                     _populate_span(span, resp, model, t0)
@@ -288,7 +288,7 @@ def _build_async_wrapper(original_create):
             try:
                 from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                decision = enforce_llm_call(kwargs)
+                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                 resp = await original_create(self, *args, **kwargs)
                 if not streaming: 
                     _populate_span(span, resp, model, t0)

@@ -182,7 +182,7 @@ def patch_openai() -> bool:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
                     from traccia.governance.policy import AgentBlockedError
 
-                    decision = enforce_llm_call(kwargs)
+                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                     if kwargs.get("model") and kwargs.get("model") != model:
                         span.set_attribute("llm.model", kwargs["model"])
                     resp = create_fn(*args, **kwargs)
@@ -397,7 +397,7 @@ def patch_openai_responses() -> bool:
                 try:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                    decision = enforce_llm_call(kwargs)
+                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                     resp = await create_fn(*args, **kwargs)
                     
                     # Extract response details

@@ -127,7 +127,7 @@ def patch_anthropic() -> bool:
             try:
                 from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                decision = enforce_llm_call(kwargs)
+                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                 resp = create_fn(self, *args, **kwargs)
                 usage = getattr(resp, "usage", None) or resp.get("usage") if isinstance(resp, dict) else None
                 input_tokens_val = None
