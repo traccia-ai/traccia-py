@@ -8,7 +8,7 @@ import threading
 import time
 from typing import Any, Dict, Optional
 
-from traccia.config import load_config
+from traccia import client_config
 from traccia.governance.policy import AgentBlockedError, ApprovalPending, _derive_base_url, _http_session
 from traccia import runtime_config
 
@@ -34,10 +34,7 @@ def _enrich_blocked(exc: AgentBlockedError, decision: Dict[str, Any]) -> AgentBl
 
 
 def _credentials() -> tuple[Optional[str], Optional[str]]:
-    config = load_config()
-    api_key = config.tracing.api_key or os.environ.get("TRACCIA_API_KEY")
-    endpoint = config.tracing.endpoint or os.environ.get("TRACCIA_ENDPOINT")
-    return api_key, endpoint
+    return client_config.resolve_credentials()
 
 
 def _agent_id() -> Optional[str]:

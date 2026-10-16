@@ -25,6 +25,7 @@ import threading
 import time
 from traccia.tracer.provider import TracerProvider
 from traccia import config as sdk_config
+from traccia import client_config
 from traccia import runtime_config
 from traccia import auto_instrumentation
 
@@ -401,6 +402,8 @@ def start_tracing(
     provider = _get_provider()
     key = env_cfg.get("api_key") or api_key
     endpoint = env_cfg.get("endpoint") or endpoint
+    # Policy, prompts and evals read this instead of re-loading env/file config.
+    client_config.set_client_config(key, endpoint or DEFAULT_OTLP_TRACE_ENDPOINT)
     try:
         sample_rate = float(env_cfg.get("sample_rate", sample_rate))
     except Exception:
@@ -821,6 +824,7 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
             _active_processor.shutdown()
     provider.shutdown()
     _flush_and_shutdown_metrics(flush_timeout)
+    client_config.clear_client_config()
     _started = False
     _init_method = None
     _metrics_shutdown = True  # ensure flag set even if _flush_and_shutdown_metrics skipped

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- The API key and endpoint passed to `init()` are now used by policy checks, `@govern` status checks, prompts and evals, not only by tracing. Before, policy checks were skipped with `missing_credentials` and `load_prompt` raised `PromptFetchError` unless the key was also in the environment or a config file. Arguments passed to a single call still take priority
+- With an API key but no endpoint, policy checks now go to the default endpoint that traces use, instead of being skipped
+
 ## [0.1.32] - 2026-10-08
 
 ### Added

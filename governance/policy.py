@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from traccia.config import load_config
+from traccia import client_config
 from traccia.governance.config import gov_config
 
 logger = logging.getLogger("traccia.governance")
@@ -167,8 +167,7 @@ def _record_block_async(
 
 
 def _fetch_and_apply_status(agent_id: str, *, fail_open: bool) -> None:
-    config = load_config()
-    api_key = config.tracing.api_key
+    api_key, traces_endpoint = client_config.resolve_credentials()
     if not api_key:
         logger.warning(
             "Traccia API key not found. @govern requires a Traccia platform account; "
@@ -176,7 +175,6 @@ def _fetch_and_apply_status(agent_id: str, *, fail_open: bool) -> None:
         )
         return
 
-    traces_endpoint = config.tracing.endpoint
     if not traces_endpoint:
         logger.warning(
             "Traccia endpoint not found. @govern requires a Traccia platform endpoint; "
