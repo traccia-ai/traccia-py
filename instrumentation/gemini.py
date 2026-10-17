@@ -309,12 +309,136 @@ def _build_async_wrapper(original_create):
     return async_wrapped
 
 
+def _extract_generate_content_prompt(kwargs, args):
+    """Return prompt text for models.generate_content."""
+    contents = kwargs.get("contents")
+    if contents is None:
+        if len(args) >= 2:
+            contents = args[1]
+        elif len(args) == 1:
+            contents = args[0]
+    if contents is None:
+        return None
+    if isinstance(contents, str):
+        return contents
+    if isinstance(contents, list):
+        parts = []
+        for item in contents:
+            if isinstance(item, str):
+                parts.append(item)
+            else:
+                txt = _safe_get(item, "text") or str(item)
+                parts.append(txt)
+        return "\n".join(parts)
+    return str(contents)
+
+
+def _populate_generate_content_span(span, resp, model, t0):
+    """Write generate_content response attributes into span."""
+    if not model:
+        resp_model = _safe_get(resp, "model_version") or _safe_get(resp, "model")
+        if resp_model and "llm.model" not in span.attributes:
+            span.set_attribute("llm.model", str(resp_model))
+        model = resp_model or model
+
+    usage = _safe_get(resp, "usage_metadata")
+    prompt_tok = _safe_get(usage, "prompt_token_count")
+    if prompt_tok is None:
+        prompt_tok = _safe_get(usage, "prompt_tokens")
+    if prompt_tok is None:
+        prompt_tok = _safe_get(usage, "input_tokens")
+
+    completion_tok = _safe_get(usage, "candidates_token_count")
+    if completion_tok is None:
+        completion_tok = _safe_get(usage, "completion_tokens")
+    if completion_tok is None:
+        completion_tok = _safe_get(usage, "output_tokens")
+
+    thought_tok = _safe_get(usage, "thoughts_token_count")
+
+    total_tok = _safe_get(usage, "total_token_count")
+    if total_tok is None:
+        total_tok = _safe_get(usage, "total_tokens")
+
+    if prompt_tok is not None:
+        span.set_attribute("llm.usage.prompt_tokens", prompt_tok)
+        span.set_attribute("llm.usage.input_tokens", prompt_tok)
+        span.set_attribute("llm.usage.prompt_source", "provider_usage")
+    if completion_tok is not None:
+        span.set_attribute("llm.usage.completion_tokens", completion_tok)
+        span.set_attribute("llm.usage.output_tokens", completion_tok)
+        span.set_attribute("llm.usage.completion_source", "provider_usage")
+    if thought_tok is not None:
+        span.set_attribute("llm.usage.thought_tokens", thought_tok)
+    if total_tok is not None:
+        span.set_attribute("llm.usage.total_tokens", total_tok)
+        span.set_attribute("llm.usage.source", "provider_usage")
+
+    output_text = _safe_get(resp, "text")
+    if output_text:
+        span.set_attribute("llm.completion", str(output_text)[:4096])
+
+    cost_val = _compute_cost(model, prompt_tok, completion_tok)
+
+    duration_val = time.perf_counter() - t0
+    _record_llm_metrics(
+        model=model,
+        input_tokens=prompt_tok,
+        output_tokens=completion_tok,
+        duration=duration_val,
+        cost=cost_val,
+    )
+
+
+def _build_models_sync_wrapper(original_generate_content):
+    """Return a sync wrapper around Models.generate_content."""
+
+    def sync_wrapped(self, *args, **kwargs):
+        tracer = _get_tracer("gemini")
+        model = kwargs.get("model") or (args[0] if args else None)
+        attributes = {"llm.vendor": "google_gemini"}
+        if model:
+            attributes["llm.model"] = str(model)
+
+        prompt_text = _extract_generate_content_prompt(kwargs, args)
+        if prompt_text:
+            attributes["llm.prompt"] = prompt_text[:4096]
+
+        t0 = time.perf_counter()
+        with tracer.start_as_current_span(
+            "llm.gemini.generate_content", attributes=attributes
+        ) as span:
+            decision = None
+            try:
+                from traccia.governance.pep import enforce_llm_call, finish_llm_call
+
+                decision = enforce_llm_call(kwargs)
+                resp = original_generate_content(self, *args, **kwargs)
+                _populate_generate_content_span(span, resp, str(model) if model else None, t0)
+                finish_llm_call(decision)
+                return resp
+            except Exception as exc:
+                try:
+                    from traccia.governance.pep import finish_llm_call as _finish
+                    _finish(decision, release=True)
+                except Exception:
+                    pass
+                span.record_exception(exc)
+                span.set_status(SpanStatus.ERROR, str(exc))
+                _record_exception_metric(str(model) if model else None)
+                raise
+
+    sync_wrapped._agent_trace_patched = True
+    return sync_wrapped
+
+
 def patch_gemini():
-    """Patch google-genai interactions.create (sync+async); returns True if patched.
+    """Patch google-genai interactions.create (sync+async) and models.generate_content; returns True if patched.
 
     Tries two SDK layouts in priority order:
       SDK >=2.x: google.genai._gaos.google_genai  (GeminiNextGenInteractions)
       SDK  <2.x: google.genai.resources.interactions  (Interactions)
+    Also patches Models.generate_content (SDK models).
     """
     global _patched
     if _patched:
@@ -364,9 +488,28 @@ def patch_gemini():
             patched_any = True
             break
 
+    _MODELS_CANDIDATES = [
+        ("google.genai.models", "Models"),
+        ("google.genai.resources.models", "Models"),
+    ]
+
+    for mod_path, cls_name in _MODELS_CANDIDATES:
+        try:
+            mod = importlib.import_module(mod_path)
+            cls = getattr(mod, cls_name, None)
+            if cls is not None:
+                orig = getattr(cls, "generate_content", None)
+                if orig and not getattr(orig, "_agent_trace_patched", False):
+                    setattr(cls, "generate_content", _build_models_sync_wrapper(orig))
+                    patched_any = True
+        except Exception:
+            continue
+
     if patched_any:
         _patched = True
     return _patched
+
+
 def _get_tracer(name):
     import traccia
 
