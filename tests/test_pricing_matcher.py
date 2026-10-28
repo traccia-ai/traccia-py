@@ -1,0 +1,139 @@
+"""
+Tests for traccia.pricing_matcher.match_model.
+
+The cases in fixtures/pricing_match_cases.json are shared with
+traccia-dashboard-service, which keeps an identical copy of the matcher; both repos
+must pass all of them. Tests below the fixture cover empty input, tables without
+_provider, the index cache, and the bundled snapshot.
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from traccia.pricing_matcher import PriceMatch, match_model
+
+_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "pricing_match_cases.json").read_text(
+        encoding="utf-8"
+    )
+)
+TABLE = _FIXTURE["table"]
+
+
+@pytest.mark.parametrize(
+    "case", _FIXTURE["cases"], ids=lambda c: f"{c['model']}|{c['vendor']}"
+)
+def test_shared_case(case):
+    result = match_model(case["model"], TABLE, case["vendor"])
+    if case["key"] is None:
+        assert result is None
+    else:
+        assert result is not None
+        assert (result.key, result.kind) == (case["key"], case["kind"])
+        if "ambiguous" in case:
+            assert result.ambiguous is case["ambiguous"]
+
+
+def test_match_reports_provider():
+    assert match_model("openai/gpt-oss-120b", TABLE, "groq") == PriceMatch(
+        "groq/openai/gpt-oss-120b", "base", "groq"
+    )
+
+
+@pytest.mark.parametrize("model", [None, "", "   "])
+def test_empty_model(model):
+    assert match_model(model, TABLE) is None
+
+
+def test_empty_table():
+    assert match_model("gpt-4o", {}) is None
+
+
+class TestTablesWithoutProvider:
+    """Hand-written tables (tests, pricing_override) have no _provider metadata."""
+
+    TABLE = {
+        "gpt-4o": {"prompt": 1},
+        "gpt-4o-mini": {"prompt": 2},
+        "xai/grok-4.7": {"prompt": 3},
+    }
+
+    def test_dated_name_finds_its_model(self):
+        assert match_model("gpt-4o-mini-2024-07-18", self.TABLE).key == "gpt-4o-mini"
+
+    def test_first_segment_is_provider(self):
+        assert match_model("grok-4.7", self.TABLE, "xai") == PriceMatch(
+            "xai/grok-4.7", "base", "xai"
+        )
+
+
+class TestIndexCache:
+    def test_table_growth_is_seen(self):
+        table = {"gpt-4o": {"prompt": 1}}
+        assert match_model("acme/o9-mega", table) is None
+        table["o9-mega"] = {"prompt": 2}
+        assert match_model("acme/o9-mega", table).key == "o9-mega"
+
+    def test_distinct_tables(self):
+        a, b = {"model-a": {}}, {"model-b": {}}
+        assert match_model("acme/model-a", a).key == "model-a"
+        assert match_model("acme/model-a", b) is None
+
+    def test_key_removed_in_place_with_the_same_size(self):
+        table = {"gpt-4o": {"prompt": 1}, "azure/gpt-4o": {"prompt": 2}}
+        assert match_model("gpt-4o", table).key == "gpt-4o"
+        del table["gpt-4o"]
+        table["other-model"] = {"prompt": 3}  # same len: the cached index is reused
+        assert match_model("gpt-4o", table).key == "azure/gpt-4o"
+        del table["azure/gpt-4o"]
+        table["another-model"] = {"prompt": 4}
+        assert match_model("gpt-4o", table) is None
+
+
+# Real model ids as each SDK reports them, against the bundled LiteLLM snapshot.
+BUNDLED_CASES = [
+    ("llama-3.3-70b-versatile", "groq", "groq/llama-3.3-70b-versatile"),
+    ("llama-3.1-8b-instant", "groq", "groq/llama-3.1-8b-instant"),
+    ("openai/gpt-oss-120b", "groq", "groq/openai/gpt-oss-120b"),
+    ("openai/gpt-oss-20b", "groq", "groq/openai/gpt-oss-20b"),
+    (
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "groq",
+        "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+    ),
+    ("moonshotai/kimi-k2-instruct-0905", "groq", "groq/moonshotai/kimi-k2-instruct-0905"),
+    ("qwen/qwen3-32b", "groq", "groq/qwen/qwen3-32b"),
+    ("gpt-4o", "openai", "gpt-4o"),
+    ("gpt-4o-2099-01-01", "openai", "gpt-4o"),
+    ("claude-sonnet-4-5", "anthropic", "claude-sonnet-4-5"),
+    ("grok-4", "xai", "xai/grok-4"),
+    ("o1-mini-2024-09-12", "azure", "azure/o1-mini-2024-09-12"),
+    ("models/gemini-2.0-flash-001", "google_gemini", "gemini/gemini-2.0-flash-001"),
+    ("gemini-2.0-flash-001", "google_gemini", "gemini/gemini-2.0-flash-001"),
+]
+
+
+@pytest.mark.parametrize("model,vendor,expected", BUNDLED_CASES)
+def test_bundled_snapshot(model, vendor, expected):
+    from traccia.processors.cost_engine import BUNDLED_PRICING
+
+    if not any(k.startswith("groq/") for k in BUNDLED_PRICING):
+        pytest.skip("bundled snapshot not available")
+    assert match_model(model, BUNDLED_PRICING, vendor).key == expected
+
+
+def test_bundled_snapshot_gemini_sdk_prefix():
+    from traccia.processors.cost_engine import BUNDLED_PRICING
+
+    result = match_model("models/gemini-2.5-flash", BUNDLED_PRICING, "google_gemini")
+    assert result is not None and result.key.rsplit("/", 1)[-1] == "gemini-2.5-flash"
+
+
+def test_bundled_snapshot_costs():
+    """1,000 input and 1,000 output tokens, priced from the vendor's own dated key."""
+    from traccia.processors.cost_engine import compute_cost
+
+    assert compute_cost("o1-mini-2024-09-12", 1000, 1000, vendor="azure") == 0.0055
+    assert compute_cost("models/gemini-2.0-flash-001", 1000, 1000, vendor="google_gemini") == 0.0005

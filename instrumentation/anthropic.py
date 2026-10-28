@@ -9,14 +9,20 @@ from traccia.tracer.span import SpanStatus
 _patched = False
 
 
-def _compute_cost(model: Optional[str], prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
-    """Compute cost from token usage using pricing config."""
+def _compute_cost(
+    model: Optional[str],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    vendor: str = "anthropic",
+) -> Optional[float]:
+    """Cost of one call, priced like its span: with the vendor it sets as llm.vendor, from the
+    shared resolver's table (which includes pricing overrides)."""
     if not model or prompt_tokens is None or completion_tokens is None:
         return None
     try:
+        from traccia.cost_resolver import get_resolver
         from traccia.processors.cost_engine import compute_cost as _compute
-        from traccia.pricing_config import load_pricing
-        return _compute(model, prompt_tokens, completion_tokens, load_pricing())
+        return _compute(model, prompt_tokens, completion_tokens, get_resolver().pricing_table, vendor=vendor)
     except Exception:
         return None
 
@@ -127,7 +133,7 @@ def patch_anthropic() -> bool:
             try:
                 from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                decision = enforce_llm_call(kwargs)
+                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                 resp = create_fn(self, *args, **kwargs)
                 usage = getattr(resp, "usage", None) or resp.get("usage") if isinstance(resp, dict) else None
                 input_tokens_val = None

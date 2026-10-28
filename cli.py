@@ -894,6 +894,10 @@ def _eval(args) -> int:
 
 def main(argv=None) -> int:
     """Main CLI entry point."""
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
     parser = argparse.ArgumentParser(
         prog="traccia",
         description="Traccia SDK - Production-ready tracing for AI agents",

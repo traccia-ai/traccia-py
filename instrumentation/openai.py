@@ -10,14 +10,20 @@ _patched = False
 _responses_patched = False
 
 
-def _compute_cost(model: Optional[str], prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
-    """Compute cost from token usage using pricing config."""
+def _compute_cost(
+    model: Optional[str],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    vendor: str = "openai",
+) -> Optional[float]:
+    """Cost of one call, priced like its span: with the vendor it sets as llm.vendor, from the
+    shared resolver's table (which includes pricing overrides)."""
     if not model or prompt_tokens is None or completion_tokens is None:
         return None
     try:
+        from traccia.cost_resolver import get_resolver
         from traccia.processors.cost_engine import compute_cost as _compute
-        from traccia.pricing_config import load_pricing
-        return _compute(model, prompt_tokens, completion_tokens, load_pricing())
+        return _compute(model, prompt_tokens, completion_tokens, get_resolver().pricing_table, vendor=vendor)
     except Exception:
         return None
 
@@ -182,7 +188,7 @@ def patch_openai() -> bool:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
                     from traccia.governance.policy import AgentBlockedError
 
-                    decision = enforce_llm_call(kwargs)
+                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                     if kwargs.get("model") and kwargs.get("model") != model:
                         span.set_attribute("llm.model", kwargs["model"])
                     resp = create_fn(*args, **kwargs)
@@ -397,7 +403,7 @@ def patch_openai_responses() -> bool:
                 try:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                    decision = enforce_llm_call(kwargs)
+                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                     resp = await create_fn(*args, **kwargs)
                     
                     # Extract response details

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
-from traccia.processors.cost_engine import BUNDLED_PRICING, BUNDLED_PRICING_GENERATED_AT
+from traccia.processors.cost_engine import BUNDLED_PRICING, BUNDLED_PRICING_GENERATED_AT, OVERRIDE_FLAG
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def load_pricing_with_source(
     env_result = _load_env_override()
     if env_result:
         env_pricing, _ = env_result
-        pricing = {**pricing, **env_pricing}
+        pricing = {**pricing, **_mark_override(env_pricing)}
         source = "env"
 
     # Layer 4: programmatic override (always wins; merges on top)
@@ -129,10 +129,15 @@ def load_pricing_with_source(
         if not isinstance(override, dict):
             logger.warning("pricing_override must be a dict; ignoring.")
         else:
-            pricing = {**pricing, **override}
+            pricing = {**pricing, **_mark_override(override)}
             source = "override"
 
     return pricing, source, generated_at
+
+
+def _mark_override(entries: Dict[str, Any]) -> Dict[str, Any]:
+    """Copies of the user's entries, flagged so vendor matching still uses them."""
+    return {key: {**entry, OVERRIDE_FLAG: True} if isinstance(entry, dict) else entry for key, entry in entries.items()}
 
 
 def load_pricing(

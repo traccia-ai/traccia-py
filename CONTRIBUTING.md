@@ -100,7 +100,7 @@ We welcome code contributions! Whether it's bug fixes, new features, or performa
 
 3. **Run tests** to ensure everything works:
    ```bash
-   pytest traccia/tests/ -v
+   pytest tests/ -v
    ```
 
 4. **Check code style**:
@@ -207,16 +207,16 @@ def init(
 
 ```bash
 # Run all tests
-pytest traccia/tests/ -v
+pytest tests/ -v
 
 # Run specific test file
-pytest traccia/tests/test_config.py -v
+pytest tests/test_config.py -v
 
 # Run with coverage
-pytest traccia/tests/ --cov=traccia --cov-report=html
+pytest tests/ --cov=traccia --cov-report=html
 
 # Run tests in watch mode (if pytest-watch installed)
-ptw traccia/tests/
+ptw tests/
 ```
 
 ### Writing Tests
@@ -246,7 +246,7 @@ def test_init_with_config_file(tmp_path):
 
 ### Test Organization
 
-- Unit tests go in `traccia/tests/`
+- Unit tests go in `tests/`
 - Name test files with `test_` prefix
 - Group related tests in classes when appropriate
 - Use fixtures for common setup

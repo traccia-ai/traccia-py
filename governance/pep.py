@@ -376,7 +376,11 @@ def _estimate_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
     return max(len(blob) // 4, 1)
 
 
-def enforce_llm_call(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def enforce_llm_call(
+    kwargs: Dict[str, Any], vendor: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Check policy before an LLM call. *vendor* is the span's llm.vendor; Spend Cap
+    uses it to pick that provider's price."""
     if not runtime_config.pep_enabled():
         return None
     model = kwargs.get("model")
@@ -388,6 +392,8 @@ def enforce_llm_call(kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "input_tokens": _estimate_tokens(kwargs),
         "retrieval": _retrieval_context(trace_id),
     }
+    if vendor:
+        context["vendor"] = vendor
     prompt = _prompt_context()
     if prompt:
         context["prompt"] = prompt

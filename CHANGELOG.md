@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `traccia.pricing_matcher.match_model()` picks the pricing key for a model name. Names match on their base name, without the provider path (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`), a Bedrock region (`us.`), or a date or `-latest` suffix. When several providers list the model, the span's `llm.vendor` price wins (its key for the exact dated version first: `azure/o1-mini-2024-09-12` over `azure/o1-mini`), then the shortest key. The platform uses an identical copy, so local and platform costs agree
+- Spans record `llm.pricing.match_kind` (`exact` or `base`) and `llm.pricing.provider` next to `llm.pricing.model_key`
+- `compute_cost()`, `compute_cost_detail()`, and `match_pricing_model_key()` take an optional `vendor`
+- `PriceMatch.ambiguous` is true when the vendor did not settle which of several providers' keys was used
+- `enforce_llm_call()` takes an optional `vendor` and sends it with the policy check, so Spend Cap uses that provider's price. The OpenAI, Anthropic and Gemini integrations pass it
+
+### Fixed
+- Model ids with an organisation prefix (`openai/gpt-oss-120b`, `qwen/qwen3-32b` on Groq) get a cost. They previously matched no pricing key
+- A model listed by several providers is priced at the calling provider's rate. `gpt-oss-120b` on a Groq span took `azure_ai/gpt-oss-120b` and now takes `groq/openai/gpt-oss-120b`
+- Gemini calls (`llm.vendor` `google_gemini`) are priced at the Gemini API rate instead of Vertex AI's. A vendor matches its pricing provider family (`bedrock` also covers `bedrock_converse`), with aliases where the names differ (`google_gemini` is `gemini`)
+- A dated model name uses its own dated price when the pricing table has one
+
+### Changed
+- No more prefix matching: a model name that matches no pricing key after the steps above (for example a fine-tuned `gpt-4o-mini-ft-…`) gets no cost instead of the price of a model whose name it starts with
+
 ## [0.1.33] - 2026-10-21
 
 ### Added
