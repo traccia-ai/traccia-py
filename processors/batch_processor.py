@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from collections import deque
 from typing import Deque, Iterable, List, Optional
 
@@ -19,11 +20,13 @@ logger = logging.getLogger(__name__)
 class BatchSpanProcessor(SpanProcessor):
     """
     Batch span processor that queues spans for export.
-    
-    Note: This runs as an enrichment processor (before span.end()),
-    but it queues spans and exports them only after they end.
+
+    Span.end() runs enrichment processors (on_end) while the span is still
+    mutable, marks it ended, then calls on_ended(). Spans are queued in
+    on_ended(), so the queue only holds ended spans. Every export, including
+    force_flush() and the final one at shutdown, runs on the worker thread.
     """
-    
+
     def __init__(
         self,
         exporter=None,
@@ -47,113 +50,143 @@ class BatchSpanProcessor(SpanProcessor):
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._shutdown = False
-        # Exports in progress; shutdown() closes the exporter only when none are.
-        self._exports_idle = threading.Condition()
-        self._active_exports = 0
-        self._exporter_closed = False
+        self._shutdown_deadline = 0.0
+        # Spans between on_end() and on_ended(); the final flush waits for them.
+        self._ending: "weakref.WeakSet[Span]" = weakref.WeakSet()
+        self._accepting = True
+        self._flush_requests: List[threading.Event] = []
+        self._worker_done = False
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
     def on_end(self, span: Span) -> None:
         """
-        Called when a span ends (BEFORE span.end() is called).
-        
-        We queue the span here, but it hasn't ended yet.
-        The span will end after enrichment processors run.
-        
-        Note: We mark the span as queued to prevent double-queuing.
-        """
-        if self._shutdown:
-            return
+        Called by Span.end() before it marks the span ended.
 
+        The span is queued in on_ended(). A span that is already ended here
+        (the OTel adapter notifies processors after ending) is queued now.
+        """
+        if getattr(span, "_ended", True):
+            self._enqueue(span)
+            return
+        if not self._wants(span):
+            return
+        with self._lock:
+            if self._accepting:
+                self._ending.add(span)
+
+    def on_ended(self, span: Span) -> None:
+        """Called by Span.end() once the span is ended; queues it for export."""
+        with self._lock:
+            # One step, so the final flush never sees the span in neither place.
+            self._ending.discard(span)
+            self._enqueue_locked(span)
+
+    def force_flush(self, timeout: Optional[float] = None) -> None:
+        """Export the spans queued so far, waiting up to timeout seconds."""
+        if threading.current_thread() is self._worker:
+            self._export_pending()
+            return
+        done = threading.Event()
+        with self._lock:
+            if self._worker_done:
+                return
+            self._flush_requests.append(done)
+        self._event.set()
+        done.wait(timeout)
+
+    def shutdown(self) -> None:
+        """Export what is queued, then shut down the exporter. Safe to call more than once."""
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown_deadline = time.monotonic() + self.shutdown_timeout
+            self._shutdown = True
+        self._event.set()
+        # The worker runs the final export, so the timeout bounds all of shutdown.
+        self._worker.join(timeout=self.shutdown_timeout)
+        if self._worker.is_alive():
+            # Closing the exporter under a running export would lose its batch.
+            logger.warning(
+                "Span export still running after %.0fs; leaving the exporter open",
+                self.shutdown_timeout,
+            )
+            return
+        if self.exporter is not None and hasattr(self.exporter, "shutdown"):
+            try:
+                self.exporter.shutdown()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
+    # Internal
+    def _wants(self, span: Span) -> bool:
         # Head-based sampling is recorded on SpanContext.trace_flags.
         # If a sampler is configured, traces marked as not-sampled (0) are dropped.
         if self.sampler and getattr(span.context, "trace_flags", 1) == 0:
-            return
+            return False
+        # Prevent double-queuing (on_end and on_ended both see the span)
+        return not getattr(span, "_batch_queued", False)
 
-        # Prevent double-queuing (span might be queued multiple times if on_end is called multiple times)
-        if hasattr(span, '_batch_queued') and span._batch_queued:
-            return
-
+    def _enqueue(self, span: Span) -> None:
         with self._lock:
-            enqueued = self.drop_policy.handle(self._queue, span, self.max_queue_size)
-            if enqueued:
-                span._batch_queued = True  # Mark as queued
-                self._event.set()
+            self._enqueue_locked(span)
 
-    def force_flush(self, timeout: Optional[float] = None) -> None:
-        """Force flush any pending spans."""
-        deadline = time.time() + timeout if timeout else None
-        while True:
-            flushed_any = self._flush_once()
-            if not flushed_any:
-                return
-            if deadline and time.time() >= deadline:
-                return
-
-    def shutdown(self) -> None:
-        """Shutdown the processor, then the exporter. Safe to call more than once."""
-        if self._shutdown:
+    def _enqueue_locked(self, span: Span) -> None:
+        if not self._accepting or not self._wants(span):
             return
-        self._shutdown = True
-        self._event.set()
-        self._worker.join(timeout=self.schedule_delay * 2)
-        self.force_flush()
-        if self.exporter is None or not hasattr(self.exporter, "shutdown"):
-            return
-        # The timed join() can return while the worker is still exporting.
-        # Closing the exporter under that export would lose its batch.
-        with self._exports_idle:
-            idle = self._exports_idle.wait_for(
-                lambda: self._active_exports == 0, timeout=self.shutdown_timeout
-            )
-            if not idle:
-                logger.warning(
-                    "Span export still running after %.0fs; leaving the exporter open",
-                    self.shutdown_timeout,
-                )
-                return
-            self._exporter_closed = True
-        try:
-            self.exporter.shutdown()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        if self.drop_policy.handle(self._queue, span, self.max_queue_size):
+            span._batch_queued = True
+            self._event.set()
 
-    # Internal
     def _worker_loop(self) -> None:
-        """Background worker that periodically flushes spans."""
+        """Background worker that exports spans periodically and on request."""
         while not self._shutdown:
             self._event.wait(timeout=self.schedule_delay)
             self._event.clear()
-            self._flush_once()
+            self._export_pending()
+        self._final_flush()
 
-    def _flush_once(self) -> bool:
-        """Flush one batch of spans."""
-        spans = self._drain_queue(self.max_export_batch_size)
-        if not spans:
-            return False
-        self._export(spans)
-        return True
+    def _final_flush(self) -> None:
+        """Export everything, including spans that are still ending, until the deadline."""
+        while True:
+            self._export_pending()
+            with self._lock:
+                remaining = self._shutdown_deadline - time.monotonic()
+                if not self._ending or remaining <= 0:
+                    self._accepting = False
+                    break
+            # on_ended() sets the event when a span that was ending is queued.
+            self._event.wait(timeout=min(remaining, 0.05))
+            self._event.clear()
+        self._export_pending()
+        with self._lock:
+            self._worker_done = True
+            requests, self._flush_requests = self._flush_requests, []
+        for request in requests:
+            request.set()
+
+    def _export_pending(self) -> None:
+        """Export the spans queued so far, then release force_flush() callers."""
+        with self._lock:
+            requests, self._flush_requests = self._flush_requests, []
+            remaining = len(self._queue)
+        # Spans queued meanwhile wait for the next round, so this always returns.
+        while remaining > 0:
+            spans = self._drain_queue(min(remaining, self.max_export_batch_size))
+            if not spans:
+                break
+            remaining -= len(spans)
+            self._export(spans)
+        for request in requests:
+            request.set()
 
     def _drain_queue(self, limit: int) -> List[Span]:
-        """
-        Drain ended spans from queue up to limit.
-
-        on_end() queues a span before Span.end() marks it ended, so a span can
-        still be ending when the queue is drained. Such spans are left in the
-        queue, in order, for a later flush instead of being dropped.
-        """
+        """Drain spans from queue up to limit."""
         items: List[Span] = []
-        still_ending: List[Span] = []
         with self._lock:
             while self._queue and len(items) < limit:
-                span = self._queue.popleft()
-                if getattr(span, "_ended", True):
-                    items.append(span)
-                else:
-                    still_ending.append(span)
-            self._queue.extendleft(reversed(still_ending))
+                items.append(self._queue.popleft())
         return items
 
     def _export(self, spans: Iterable[Span]) -> None:
@@ -161,10 +194,6 @@ class BatchSpanProcessor(SpanProcessor):
         if self.exporter is None:
             return
 
-        with self._exports_idle:
-            if self._exporter_closed:
-                return
-            self._active_exports += 1
         try:
             # Export spans - exporter will handle conversion if needed
             self.exporter.export(list(spans))
@@ -173,7 +202,3 @@ class BatchSpanProcessor(SpanProcessor):
             import traceback
             traceback.print_exc()
             return
-        finally:
-            with self._exports_idle:
-                self._active_exports -= 1
-                self._exports_idle.notify_all()

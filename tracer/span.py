@@ -313,6 +313,9 @@ class Span:
         
         self._ended = True
 
+        # 4. Processors that need the ended span (e.g. batching for export)
+        self.tracer._run_ended_processors(self)
+
     # Context manager support
     def __enter__(self) -> "Span":
         """Enter context manager."""
