@@ -127,7 +127,7 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-Each call gets an `llm.groq.chat.completions` span and goes through the Spend Cap. Settlement charges Groq's reported usage at Groq's own price (cached prompt tokens at the cached rate); a stream stopped or failed partway is charged an estimate of what it produced; a `with_streaming_response` call, whose body you read yourself, is charged its full reservation. `with_raw_response` works as before. Calls made to Groq through the OpenAI client (`base_url="https://api.groq.com/openai/v1"`) go through the OpenAI integration instead, so use the `groq` client for Groq.
+Each call gets an `llm.groq.chat.completions` span and goes through the Spend Cap. Settlement charges Groq's reported usage at Groq's own price (cached prompt tokens at the cached rate); a stream closed or failed partway is charged an estimate of what it produced; a stream dropped without `close()`, or still open at `stop_tracing()`, has its request aborted and is charged its full reservation, as is a `with_streaming_response` call, whose body you read yourself. `with_raw_response` works as before. Calls made to Groq through the OpenAI client (`base_url="https://api.groq.com/openai/v1"`) go through the OpenAI integration instead, so use the `groq` client for Groq.
 
 
 ### Load a versioned prompt

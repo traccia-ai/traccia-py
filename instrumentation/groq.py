@@ -12,15 +12,19 @@ Patches ``Completions.create`` and ``AsyncCompletions.create`` so every call get
 - Finalization (span attributes, governance settlement, metrics) runs in a copy of the
   ``create()`` call's context, so it belongs to the agent and span that made the call,
   whichever context consumes the stream.
-- Settlement charges the Spend Cap what the call cost: its priced token usage (at Groq's
-  price), an estimate when the response or stream was read but carried no usage, or the full
-  reservation when nothing of the response was read through the SDK. Only a call that failed
-  before any output releases its reservation. The settle request runs on a worker thread, so
-  a slow policy server does not delay the caller.
+- Settlement charges the Spend Cap what the call cost: its token usage priced at Groq's price
+  (or a pricing override), an estimate priced the same way when the response or stream was
+  read but carried no usage, or the full reservation when the cost is unknown: nothing of the
+  response was read through the SDK, the stream was dropped unfinished, or the call was still
+  open at shutdown. Only a call that failed before any output releases its reservation. The
+  settle request runs on a worker thread, so a slow policy server does not delay the caller.
+- A stream dropped unfinished, or still open when stop_tracing() runs or the interpreter
+  exits, has its HTTP response closed so Groq stops generating it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import functools
 import json
@@ -41,7 +45,14 @@ SPAN_NAME = "llm.groq.chat.completions"
 _RAW_RESPONSE_HEADER = "X-Stainless-Raw-Response"
 _SUCCESS = "success"
 _ERROR = "error"
+# A stream garbage-collected before it was finished or closed.
+_ABANDONED = "abandoned"
+# A call still in flight when stop_tracing() runs or the interpreter exits.
+_SHUTDOWN = "shutdown"
+_INTERRUPTED = (_ABANDONED, _SHUTDOWN)
 _UNSET = object()
+# Response closes scheduled for abandoned async streams; held until they finish.
+_closing: "set[asyncio.Task]" = set()
 
 
 def _safe_get(obj: Any, path: str, default: Any = None) -> Any:
@@ -215,7 +226,7 @@ def _record_metrics(kind: str, model: Optional[str], tokens: Optional[Tuple[int,
 
 class _CallState:
     """Span and governance state for one create() call. Holds no reference to the stream,
-    so a stream's garbage-collection finalizer can hold it."""
+    only its HTTP response, so a stream's garbage-collection finalizer can hold it."""
 
     def __init__(self, span: Any, kwargs: Dict[str, Any]) -> None:
         self.span = span
@@ -229,6 +240,10 @@ class _CallState:
         self._lock = threading.RLock()
         self._done = False
         self._abandoned: Optional[weakref.finalize] = None
+        # The stream's HTTP response, closed to stop a stream that is abandoned or still open
+        # at shutdown.
+        self._response: Any = None
+        self._async = False
         self._parts: List[str] = []
         self._chars = 0
         self._chunks = 0
@@ -273,7 +288,8 @@ class _CallState:
                 self.finalize(_SUCCESS)
 
         stream.close = close
-        self._abandoned = weakref.finalize(stream, self.finalize, _SUCCESS)
+        self._response = getattr(stream, "response", None)
+        self._abandoned = weakref.finalize(stream, self.finalize, _ABANDONED)
 
     def trace_async_stream(self, stream: Any) -> None:
         """Wrap an AsyncStream so the span ends when the stream does."""
@@ -287,7 +303,30 @@ class _CallState:
                 self.finalize(_SUCCESS)
 
         stream.close = close
-        self._abandoned = weakref.finalize(stream, self.finalize, _SUCCESS)
+        self._response = getattr(stream, "response", None)
+        self._async = True
+        self._abandoned = weakref.finalize(stream, self.finalize, _ABANDONED)
+
+    def settle_at_shutdown(self) -> None:
+        """Stop and settle the call if it is still open (see pep.settle_open_calls)."""
+        self.finalize(_SHUTDOWN)
+
+    def _abort(self) -> None:
+        """Close the stream's HTTP response, so Groq stops generating (and billing) it."""
+        response = self._response
+        if response is None:
+            return
+        try:
+            if not self._async:
+                response.close()
+                return
+            # An async response closes on its own event loop; without one running here (at
+            # interpreter exit) it cannot be closed.
+            task = asyncio.get_running_loop().create_task(response.aclose())
+            _closing.add(task)
+            task.add_done_callback(_closing.discard)
+        except Exception:
+            pass
 
     # -- finalization --------------------------------------------------------
 
@@ -302,6 +341,7 @@ class _CallState:
             self._done = True
         if self._abandoned is not None:
             self._abandoned.detach()
+        _untrack(self)
 
         def run() -> None:
             self._finish(kind, response, error)
@@ -318,6 +358,9 @@ class _CallState:
     def _finish(self, kind: str, response: Any, error: Optional[BaseException]) -> None:
         span = self.span
         try:
+            if kind in _INTERRUPTED:
+                self._abort()
+                span.set_attribute("llm.interrupted", kind)
             if kind == _SUCCESS and response is not _UNSET:
                 choice = _first_choice(response)
                 message = _safe_get(choice, "message")
@@ -407,6 +450,8 @@ class _CallState:
         """What to settle the reservation with. Groq bills the tokens it generated, also for
         a stream that was stopped, closed or failed partway. ``read``: whether any of the
         response reached the caller."""
+        from traccia.governance.pep import reserved_usd
+
         if tokens:
             return {
                 "actual_usd": _compute_cost(model, tokens[0], tokens[1], tokens[2]),
@@ -415,23 +460,47 @@ class _CallState:
                 "input_tokens": tokens[0],
                 "output_tokens": tokens[1],
             }
+        if kind in _INTERRUPTED:
+            # Dropped unfinished, or still open at shutdown: Groq bills what it generated until
+            # the request stopped, which is unknown without usage, so keep the reservation.
+            return {"actual_usd": reserved_usd(self.decision)}
         if read or chars > 0:
             # The response was read but carried no usage (or the stream stopped before it):
             # estimate the output from the text, at least one token, and the prompt from the
-            # request. The server prices the estimate, and only when both counts are present.
+            # request. Priced like reported usage, so a pricing override applies; the server
+            # prices it when the table has no Groq entry, and only when both counts are present.
+            input_tokens = self.prompt_tokens or 0
+            output_tokens = max(math.ceil(chars / 4), 1)
             return {
+                "actual_usd": _compute_cost(model, input_tokens, output_tokens),
                 "model": model,
                 "vendor": VENDOR,
-                "input_tokens": self.prompt_tokens or 0,
-                "output_tokens": max(math.ceil(chars / 4), 1),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
             }
         if kind == _SUCCESS:
             # The call completed but nothing of the response was read through the SDK, so its
             # cost is unknown: charge the full reservation rather than nothing.
-            from traccia.governance.pep import reserved_usd
-
             return {"actual_usd": reserved_usd(self.decision)}
         return {"release": True}
+
+
+def _track(state: _CallState) -> None:
+    try:
+        from traccia.governance.pep import track_open_call
+
+        track_open_call(state)
+    except Exception:
+        pass
+
+
+def _untrack(state: _CallState) -> None:
+    try:
+        from traccia.governance.pep import untrack_open_call
+
+        untrack_open_call(state)
+    except Exception:
+        pass
 
 
 def _estimate_prompt_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
@@ -450,8 +519,9 @@ def _traced_iterator(inner: Any, state: _CallState):
             state.on_chunk(chunk)
             yield chunk
     except GeneratorExit:
-        # The consumer stopped early (closed, or dropped the stream).
-        state.finalize(_SUCCESS)
+        # Only garbage collection closes this generator: Stream.close() closes the response,
+        # not the iterator. So the stream was dropped unfinished.
+        state.finalize(_ABANDONED)
         raise
     except BaseException as exc:
         state.finalize(_ERROR, error=exc)
@@ -466,7 +536,7 @@ async def _traced_async_iterator(inner: Any, state: _CallState):
             state.on_chunk(chunk)
             yield chunk
     except GeneratorExit:
-        state.finalize(_SUCCESS)
+        state.finalize(_ABANDONED)
         raise
     except BaseException as exc:
         state.finalize(_ERROR, error=exc)
@@ -548,6 +618,7 @@ def _start(kwargs: Dict[str, Any]) -> Tuple[Any, _CallState, Any]:
 
     span = _get_tracer("groq").start_span(SPAN_NAME, attributes=_request_attributes(kwargs))
     state = _CallState(span, kwargs)
+    _track(state)
     token = push_span(span)
     state.ctx = contextvars.copy_context()
     return span, state, token

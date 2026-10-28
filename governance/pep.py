@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Dict, Optional, Set
 
@@ -557,6 +558,50 @@ def flush_pending_settles(timeout: Optional[float] = 10.0) -> None:
         pending = list(_pending_settles)
     if pending:
         wait(pending, timeout=timeout)
+
+
+# LLM calls still in flight: an open stream, or a request that has not returned. Each has
+# settle_at_shutdown(). Weak, so a call that is dropped and collected is not kept alive here.
+_open_calls: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_open_calls_hook = False
+
+
+def track_open_call(call: Any) -> None:
+    """Register a call in flight; settle_open_calls() settles it if it is still open then."""
+    global _open_calls_hook
+    with _settle_lock:
+        _open_calls.add(call)
+        if not _open_calls_hook:
+            # Registered after start_tracing()'s exit hook, so it runs first: spans it ends
+            # are still exported.
+            atexit.register(settle_open_calls)
+            _open_calls_hook = True
+
+
+def untrack_open_call(call: Any) -> None:
+    with _settle_lock:
+        _open_calls.discard(call)
+
+
+def settle_open_calls(timeout: float = 10.0) -> None:
+    """Settle the calls still in flight, then wait for every pending settle, all within
+    ``timeout`` seconds. Each call is stopped where possible and charged what it reported,
+    or its reservation when that is unknown. Run by stop_tracing() and at interpreter exit.
+    """
+    deadline = time.monotonic() + timeout
+    with _settle_lock:
+        calls = list(_open_calls)
+    for done, call in enumerate(calls):
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "%d open LLM call(s) not settled before the shutdown time limit", len(calls) - done
+            )
+            break
+        try:
+            call.settle_at_shutdown()
+        except Exception as exc:
+            logger.debug("settling an open call at shutdown failed: %s", exc)
+    flush_pending_settles(timeout=max(deadline - time.monotonic(), 0.0))
 
 
 def enforce_tool_call(name: str, arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:

@@ -8,6 +8,8 @@ server through traccia.governance.pep._http_session. Spans come from a recording
 import asyncio
 import gc
 import json
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -20,7 +22,8 @@ from opentelemetry.trace import INVALID_SPAN_CONTEXT  # noqa: E402
 
 import traccia.instrumentation.groq as groq_mod  # noqa: E402
 from traccia import runtime_config  # noqa: E402
-from traccia.governance.pep import estimate_prompt_tokens, flush_pending_settles  # noqa: E402
+from traccia.governance import pep  # noqa: E402
+from traccia.governance.pep import estimate_prompt_tokens, flush_pending_settles, settle_open_calls  # noqa: E402
 from traccia.governance.policy import AgentBlockedError  # noqa: E402
 from traccia.instrumentation.groq import patch_groq  # noqa: E402
 from traccia.tracer.span import SpanStatus  # noqa: E402
@@ -31,6 +34,8 @@ MESSAGES = [{"role": "system", "content": "Be brief."}, {"role": "user", "conten
 PROMPT_ESTIMATE = estimate_prompt_tokens({"messages": MESSAGES})
 USAGE = {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
 RESERVED = 0.5
+# Groq's bundled price for MODEL, USD per 1K input and output tokens.
+GROQ_RATES = (0.00059, 0.00079)
 COMPLETION = {
     "id": "c1",
     "object": "chat.completion",
@@ -143,10 +148,16 @@ class GroqApi:
         self.chunks = CHUNKS
         self.stream_error = None
         self.requests = []
+        # Set to an Event to hold each request until it is set (a call still in flight).
+        self.hold = None
+        self.entered = threading.Event()
 
     def __call__(self, request):
         body = json.loads(request.content)
         self.requests.append(body)
+        self.entered.set()
+        if self.hold is not None:
+            self.hold.wait(timeout=10)
         if self.status != 200:
             return httpx.Response(self.status, json={"error": {"message": "bad request"}})
         if body.get("stream"):
@@ -222,9 +233,10 @@ def priced(cost=pytest.approx(0.0000095, rel=0.1)):
     }
 
 
-def estimated(output_tokens, input_tokens=PROMPT_ESTIMATE):
+def estimated(output_tokens, input_tokens=PROMPT_ESTIMATE, rates=GROQ_RATES):
+    """An estimate priced locally, at *rates*, like provider-reported usage (to 6 decimals)."""
     return {
-        "actual_usd": None,
+        "actual_usd": pytest.approx(round((input_tokens * rates[0] + output_tokens * rates[1]) / 1000, 6)),
         "release": False,
         "model": MODEL,
         "vendor": "groq",
@@ -473,14 +485,115 @@ def test_stream_dropped_unread_charges_the_reservation(client, tracer, server, g
     assert [settle_fields(s)["actual_usd"] for s in server.settles] == [RESERVED]
 
 
-def test_stream_dropped_mid_read_settles_what_was_streamed(client, server, governed):
+def test_stream_dropped_mid_read_aborts_the_request_and_charges_the_reservation(client, tracer, server, governed):
     stream = create(client, stream=True)
+    response = stream.response
     it = iter(stream)
     next(it)
     next(it)  # 'Par'
     del it, stream
     gc.collect()
-    assert [settle_fields(s) for s in server.settles] == [estimated(1)]
+    # Groq bills the whole completion unless the request stops; without usage the cost is
+    # unknown, so the reservation is kept.
+    assert response.is_closed
+    assert [settle_fields(s)["actual_usd"] for s in server.settles] == [RESERVED]
+    assert tracer.spans[0].attributes["llm.interrupted"] == "abandoned"
+    assert tracer.spans[0].ended == 1
+
+
+def test_interrupted_call_is_priced_with_the_pricing_override(client, server, governed, monkeypatch):
+    import traccia.cost_resolver as cr
+    from traccia.pricing_config import load_pricing_with_source
+
+    monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+    monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+    table, source, generated_at = load_pricing_with_source({MODEL: {"prompt": 1.0, "completion": 2.0}})
+    monkeypatch.setattr(cr, "_resolver", cr.CostResolver(table, source, generated_at))
+    stream = create(client, stream=True)
+    for c in stream:
+        if c.choices[0].delta.content:
+            break
+    stream.close()
+    # The same resolver as provider-reported usage, so the override applies, not server pricing.
+    assert [settle_fields(s) for s in server.settles] == [estimated(1, rates=(1.0, 2.0))]
+
+
+def test_unpriced_model_estimate_is_left_to_the_server(client, server, governed, monkeypatch):
+    monkeypatch.setattr(groq_mod, "_compute_cost", lambda *a: None)
+    stream = create(client, stream=True)
+    for c in stream:
+        if c.choices[0].delta.content:
+            break
+    stream.close()
+    assert settle_fields(server.settles[0])["actual_usd"] is None
+    assert settle_fields(server.settles[0])["output_tokens"] == 1
+
+
+def test_open_stream_at_shutdown_is_aborted_and_charged_the_reservation(client, tracer, server, governed):
+    stream = create(client, stream=True)
+    response = stream.response
+    it = iter(stream)
+    next(it)
+    next(it)
+    settle_open_calls(timeout=5)
+    assert response.is_closed
+    assert tracer.spans[0].ended == 1
+    assert tracer.spans[0].attributes["llm.interrupted"] == "shutdown"
+    assert [settle_fields(s)["actual_usd"] for s in server.settles] == [RESERVED]
+    stream.close()
+    assert len(server.settles) == 1
+
+
+def test_request_in_flight_at_shutdown_is_charged_the_reservation(client, api, tracer, server):
+    api.hold = threading.Event()
+
+    def call():
+        with runtime_config.run_identity(agent_id="agent-a", pep_enabled=True):
+            create(client)
+
+    caller = threading.Thread(target=call)
+    caller.start()
+    assert api.entered.wait(timeout=5)
+    settle_open_calls(timeout=5)
+    assert [settle_fields(s)["actual_usd"] for s in server.settles] == [RESERVED]
+    assert tracer.spans[0].attributes["llm.interrupted"] == "shutdown"
+
+    api.hold.set()
+    caller.join(timeout=5)
+    # The response that arrives afterwards settles nothing more.
+    assert len(server.settles) == 1
+    assert tracer.spans[0].ended == 1
+
+
+def test_settle_open_calls_stops_at_its_time_limit():
+    class SlowCall:
+        def __init__(self):
+            self.ran = False
+
+        def settle_at_shutdown(self):
+            self.ran = True
+            time.sleep(0.3)
+
+    calls = [SlowCall() for _ in range(5)]
+    for call in calls:
+        pep.track_open_call(call)
+    try:
+        started = time.monotonic()
+        settle_open_calls(timeout=0.5)
+        assert time.monotonic() - started < 1.0
+        assert 0 < sum(call.ran for call in calls) < 5
+    finally:
+        for call in calls:
+            pep.untrack_open_call(call)
+
+
+def test_stop_tracing_settles_open_calls(monkeypatch):
+    from traccia import auto
+
+    timeouts = []
+    monkeypatch.setattr(pep, "settle_open_calls", lambda timeout=10.0: timeouts.append(timeout))
+    auto.stop_tracing(flush_timeout=3.0)
+    assert timeouts == [3.0]
 
 
 def test_error_mid_stream_settles_what_was_streamed_and_propagates(client, api, tracer, server, governed):
@@ -720,6 +833,25 @@ def test_async_stream_closed_early_settles_what_was_streamed(async_client, serve
 
     asyncio.run(run())
     assert [settle_fields(s) for s in server.settles] == [estimated(1)]
+
+
+def test_async_stream_dropped_mid_read_charges_the_reservation(async_client, server, governed):
+    closed = []
+
+    async def run():
+        stream = await create(async_client, stream=True)
+        response = stream.response
+        it = stream.__aiter__()
+        await it.__anext__()
+        await it.__anext__()
+        del it, stream
+        gc.collect()
+        await asyncio.sleep(0.05)
+        closed.append(response.is_closed)
+
+    asyncio.run(run())
+    assert closed == [True]
+    assert [settle_fields(s)["actual_usd"] for s in server.settles] == [RESERVED]
 
 
 def test_async_http_error_releases(async_client, api, server, governed):

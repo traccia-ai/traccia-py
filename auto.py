@@ -811,7 +811,15 @@ def force_flush(flush_timeout: Optional[float] = None) -> None:
 def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     """Force flush and shutdown registered processors and provider."""
     global _started, _init_method, _auto_trace_context, _metrics_shutdown
-    
+
+    # Stop and settle LLM calls still in flight, so their spans end before the flush below.
+    try:
+        from traccia.governance.pep import settle_open_calls
+
+        settle_open_calls(timeout=flush_timeout if flush_timeout is not None else 10.0)
+    except Exception:
+        pass
+
     # End auto-trace if active
     if _auto_trace_context:
         _cleanup_auto_trace()
