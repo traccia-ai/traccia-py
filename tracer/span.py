@@ -33,6 +33,8 @@ class Span:
         otel_span: OTelSpan,
         tracer: "Tracer",
         parent_span_id: Optional[str] = None,
+        name: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Initialize span wrapper.
@@ -41,6 +43,8 @@ class Span:
             otel_span: OpenTelemetry Span instance
             tracer: Traccia Tracer instance  
             parent_span_id: Parent span ID (hex string, for compatibility)
+            name: Span name as requested at start
+            attributes: Attributes requested at start
         """
         self._otel_span = otel_span
         self.tracer = tracer
@@ -78,6 +82,22 @@ class Span:
         # Maintain attribute dict for easy access
         # This mirrors OTel span attributes
         self._attributes: Dict[str, Any] = {}
+
+        # Unsampled (non-recording) OTel spans keep neither name nor attributes.
+        # Hold them here so enrichment (e.g. cost from model and token counts)
+        # works the same at any sample rate; they are still never exported.
+        if not otel_span.is_recording():
+            if name is not None:
+                self.name = name
+            if attributes:
+                self._attributes.update(attributes)
+            # get_current_span() returns this wrapper instead of a new one, so
+            # attributes set through it reach the same dict.
+            try:
+                if getattr(otel_span, "_traccia_span", None) is None:
+                    otel_span._traccia_span = self
+            except Exception:
+                pass
 
     def _format_trace_state(self, trace_state) -> Optional[str]:
         """Format OTel TraceState to W3C string format."""

@@ -15,6 +15,9 @@ class LoggingSpanProcessor(SpanProcessor):
         self.logger = logger or logging.getLogger("traccia.traces")
 
     def on_end(self, span) -> None:
+        # Logging is an output path: skip spans the sampler dropped.
+        if getattr(span.context, "trace_flags", 1) == 0:
+            return
         attrs = span.attributes or {}
         msg = (
             f"[trace] name={span.name} trace_id={span.context.trace_id} "

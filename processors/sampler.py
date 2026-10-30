@@ -3,6 +3,9 @@
 import random
 from dataclasses import dataclass
 
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+from opentelemetry.sdk.trace.sampling import Sampler as OTelSampler
+
 
 @dataclass
 class SamplingResult:
@@ -18,5 +21,15 @@ class Sampler:
         self.sample_rate = sample_rate
 
     def should_sample(self) -> SamplingResult:
-        return SamplingResult(sampled=random.random() <= self.sample_rate)
+        # random() returns values in [0.0, 1.0), so a strict comparison keeps
+        # rate 0 at never and rate 1 at always.
+        return SamplingResult(sampled=random.random() < self.sample_rate)
 
+    def to_otel_sampler(self) -> OTelSampler:
+        """
+        Build the OpenTelemetry sampler that applies this rate at span creation.
+
+        Root spans are sampled by trace ID ratio. Child spans follow their
+        parent's decision, so a trace is exported whole or not at all.
+        """
+        return ParentBased(root=TraceIdRatioBased(self.sample_rate))

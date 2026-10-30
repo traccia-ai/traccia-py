@@ -19,6 +19,10 @@ def get_current_span() -> Optional["Span"]:
     """
     otel_span = otel_get_current_span()
     if otel_span and otel_span.get_span_context().is_valid:
+        # Unsampled spans keep their attributes only on the original wrapper
+        existing = getattr(otel_span, '_traccia_span', None)
+        if existing is not None:
+            return existing
         # Get tracer from span if available
         try:
             if hasattr(otel_span, '_traccia_tracer'):
