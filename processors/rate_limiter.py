@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
 from collections import deque
-from typing import Optional
+from typing import Any, Optional
 
-from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor as OTelSpanProcessor
 
 from traccia.errors import RateLimitError
 
@@ -155,7 +156,7 @@ class RateLimiter:
             self._blocked_spans = 0
 
 
-class RateLimitingSpanProcessor:
+class RateLimitingSpanProcessor(OTelSpanProcessor):
     """
     Span processor that enforces rate limiting before passing to next processor.
     
@@ -165,7 +166,7 @@ class RateLimitingSpanProcessor:
     
     def __init__(
         self,
-        next_processor,
+        next_processor: Any = None,
         max_spans_per_second: Optional[float] = None,
         max_block_ms: int = 100,
     ):
@@ -177,18 +178,24 @@ class RateLimitingSpanProcessor:
             max_spans_per_second: Maximum spans per second (None = unlimited)
             max_block_ms: Maximum milliseconds to block before dropping
         """
+        super().__init__()
         self.next_processor = next_processor
         self.rate_limiter = RateLimiter(
             max_spans_per_second=max_spans_per_second,
             max_block_ms=max_block_ms,
         )
     
-    def on_start(self, span, parent_context=None):
+    def on_start(self, span: Any, parent_context: Optional[Any] = None) -> None:
         """Called when span starts - pass through to next processor."""
         if self.next_processor and hasattr(self.next_processor, 'on_start'):
             self.next_processor.on_start(span, parent_context)
+
+    def _on_ending(self, span: Any) -> None:
+        """Called when span is ending - pass through to next processor."""
+        if self.next_processor and hasattr(self.next_processor, '_on_ending'):
+            self.next_processor._on_ending(span)
     
-    def on_end(self, span):
+    def on_end(self, span: Any) -> None:
         """
         Called when span ends - check rate limit before passing to next processor.
         
@@ -203,7 +210,7 @@ class RateLimitingSpanProcessor:
         if self.next_processor and hasattr(self.next_processor, 'on_end'):
             self.next_processor.on_end(span)
     
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Shutdown processor and log final stats."""
         stats = self.rate_limiter.get_stats()
         if stats["enabled"] and stats["dropped_spans"] > 0:
@@ -216,8 +223,49 @@ class RateLimitingSpanProcessor:
         if self.next_processor and hasattr(self.next_processor, 'shutdown'):
             self.next_processor.shutdown()
     
-    def force_flush(self, timeout_millis: int = 30000):
-        """Force flush - pass through to next processor."""
-        if self.next_processor and hasattr(self.next_processor, 'force_flush'):
-            return self.next_processor.force_flush(timeout_millis)
-        return True
+    def force_flush(
+        self,
+        timeout_millis: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """Force flush - pass through adapting to processor convention."""
+        if timeout_millis is not None:
+            ms = int(timeout_millis)
+            sec = ms / 1000.0
+        elif timeout is not None:
+            sec = float(timeout)
+            ms = int(sec * 1000)
+        else:
+            ms = 30000
+            sec = None
+
+        if not self.next_processor or not hasattr(self.next_processor, 'force_flush'):
+            return True
+
+        return self._forward_force_flush(self.next_processor, ms, sec)
+
+    @staticmethod
+    def _forward_force_flush(processor: Any, timeout_millis: int, timeout_sec: Optional[float]) -> bool:
+        """Forward force_flush adapting timeout argument."""
+        try:
+            params = inspect.signature(processor.force_flush).parameters
+            if "timeout" in params and "timeout_millis" not in params:
+                res = processor.force_flush(timeout=timeout_sec)
+                return True if res is None else bool(res)
+            if "timeout_millis" in params:
+                res = processor.force_flush(timeout_millis=timeout_millis)
+                return True if res is None else bool(res)
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            res = processor.force_flush(timeout_millis=timeout_millis)
+            return True if res is None else bool(res)
+        except TypeError:
+            try:
+                res = processor.force_flush(timeout=timeout_sec)
+                return True if res is None else bool(res)
+            except TypeError:
+                res = processor.force_flush()
+                return True if res is None else bool(res)
+

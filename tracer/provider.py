@@ -98,8 +98,11 @@ class TracerProvider:
         Args:
             processor: SpanProcessor instance (OTel-compatible or Traccia-compatible)
         """
-        # If processor is OTel-compatible, add to OTel provider
-        if isinstance(processor, OTelSpanProcessor):
+        # If processor wraps a Traccia enrichment processor, treat as enrichment
+        next_processor = getattr(processor, "next_processor", None)
+        if next_processor is not None and not isinstance(next_processor, OTelSpanProcessor):
+            self._enrichment_processors.append(processor)
+        elif isinstance(processor, OTelSpanProcessor):
             self._otel_provider.add_span_processor(processor)
             self._export_processors.append(processor)
         else:
