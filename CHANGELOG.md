@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read to the end, closed, or garbage collected. Read to the end, it records the full completion, token usage, and cost
+- A streamed call settles for the agent that made it, even if the stream is read under another `run_identity` or after it exits. Cancellation (`asyncio.CancelledError`) and `KeyboardInterrupt` end the span with an error; the governance reservation is released if nothing was received yet, otherwise an estimate of what was received is charged
+- A stream that fails or is cancelled keeps the text received so far on its span. A stream dropped without being finished settles on a background thread, so garbage collection never blocks on the settle request
+- A Groq stream dropped without being finished or closed has its request aborted, so Groq stops generating it, and is charged its reservation unless Groq reported usage. A stream stopped with `break` and then closed still settles an estimate of what was streamed
+- A Groq call settled from an estimate (no usage reported) is priced locally like reported usage, so a pricing override applies to it
+- `stop_tracing()` and interpreter exit stop and settle Groq calls still in flight (open streams, requests not yet returned): charged their reported usage, or their reservation when it is unknown, within the `stop_tracing(flush_timeout=...)` limit (10 seconds by default). Their spans end with `llm.interrupted` set to `shutdown`
+- Streamed calls made through `with_raw_response` or `with_streaming_response` are traced: the stream returned by `.parse()` records the completion and token usage, and the span ends on `close()` if the stream is never parsed
 - `traccia.pricing_matcher.match_model()` picks the pricing key for a model name. Names match on their base name, without the provider path (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`), a Bedrock region (`us.`), or a date or `-latest` suffix. When several providers list the model, the span's `llm.vendor` price wins (its key for the exact dated version first: `azure/o1-mini-2024-09-12` over `azure/o1-mini`), then the shortest key. The platform uses an identical copy, so local and platform costs agree
 - Spans record `llm.pricing.match_kind` (`exact` or `base`) and `llm.pricing.provider` next to `llm.pricing.model_key`
 - `compute_cost()`, `compute_cost_detail()`, and `match_pricing_model_key()` take an optional `vendor`
