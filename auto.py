@@ -525,7 +525,8 @@ def start_tracing(
 
     # Use OTLP exporter by default for network export
     if exporter:
-        network_exporter = exporter
+        # The caller owns this exporter; stop_tracing() leaves it open.
+        network_exporter = _CallerOwnedExporter(exporter)
     elif use_otlp:
         # Use OTLP exporter (OpenTelemetry standard)
         network_exporter = OTLPExporter(
@@ -666,11 +667,21 @@ def start_tracing(
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
     # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor
+    caller_owned_otlp = isinstance(network_exporter, _CallerOwnedExporter) and isinstance(
+        network_exporter.exporter, OTLPExporter
+    )
+    if caller_owned_otlp:
+        # OTel's BatchSpanProcessor exports a caller's OTLPExporter directly, as before.
+        network_exporter = network_exporter.exporter
     if use_otlp and isinstance(network_exporter, OTLPExporter) and hasattr(network_exporter, '_otel_exporter'):
         # Use OTel's BatchSpanProcessor for OTLP export
         from opentelemetry.sdk.trace.export import BatchSpanProcessor as OTelBatchSpanProcessor
+        otel_exporter = network_exporter._otel_exporter
+        if caller_owned_otlp:
+            # OTel's processor shuts its exporter down; the caller's stays open.
+            otel_exporter = _CallerOwnedSpanExporter(otel_exporter)
         otel_processor = OTelBatchSpanProcessor(
-            network_exporter._otel_exporter,
+            otel_exporter,
             max_queue_size=max_queue_size,
             max_export_batch_size=max_export_batch_size,
             schedule_delay_millis=schedule_delay_millis,
@@ -819,8 +830,10 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     provider = _get_provider()
     if _active_processor:
         try:
-            _active_processor.force_flush(timeout=flush_timeout)
+            if flush_timeout is not None:
+                _active_processor.force_flush(timeout=flush_timeout)
         finally:
+            # shutdown() exports what is still queued, bounded by its own timeout.
             _active_processor.shutdown()
     provider.shutdown()
     _flush_and_shutdown_metrics(flush_timeout)
@@ -841,7 +854,7 @@ def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanPr
             return
         try:
             if processor:
-                processor.force_flush()
+                # shutdown() exports what is still queued, bounded by its own timeout.
                 processor.shutdown()
         finally:
             provider.shutdown()
@@ -942,9 +955,40 @@ def _combine_exporters(primary, secondary):
         def shutdown(self):
             for exp in (primary, secondary):
                 if hasattr(exp, "shutdown"):
-                    exp.shutdown()
+                    try:
+                        exp.shutdown()
+                    except Exception:
+                        import logging
+                        logging.getLogger(__name__).exception("Exporter shutdown failed")
 
     return _Multi()
+
+
+class _CallerOwnedExporter:
+    """An exporter passed to start_tracing(); the caller decides when to shut it down."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+
+class _CallerOwnedSpanExporter:
+    """The OTel exporter inside a caller's OTLPExporter, as OTel's BatchSpanProcessor sees it."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self.exporter.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        # The caller decides when to shut it down.
+        pass
 
 
 _pricing_refresh_stop: Optional[threading.Event] = None

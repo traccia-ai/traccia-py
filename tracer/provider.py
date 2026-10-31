@@ -30,6 +30,15 @@ class SpanProcessor:
         """
         pass
 
+    def on_ended(self, span) -> None:
+        """
+        Called after on_end(), once the span is ended and immutable.
+
+        Args:
+            span: Traccia Span instance (ended)
+        """
+        pass
+
     def shutdown(self) -> None:
         """Shutdown the processor."""
         pass

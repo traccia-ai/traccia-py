@@ -9,6 +9,7 @@ from collections import deque
 from typing import Optional
 
 from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace import SpanProcessor as OTelSpanProcessor
 
 from traccia.errors import RateLimitError
 
@@ -200,8 +201,16 @@ class RateLimitingSpanProcessor:
             return
         
         # Pass to next processor
+        if self.next_processor and hasattr(self.next_processor, 'on_ended'):
+            # on_ended() forwards only the spans admitted here.
+            span._rate_limit_admitted = True
         if self.next_processor and hasattr(self.next_processor, 'on_end'):
             self.next_processor.on_end(span)
+
+    def on_ended(self, span):
+        """Called once a Traccia span is ended - forward it if on_end() admitted it."""
+        if getattr(span, "_rate_limit_admitted", False):
+            self.next_processor.on_ended(span)
     
     def shutdown(self):
         """Shutdown processor and log final stats."""
@@ -216,8 +225,17 @@ class RateLimitingSpanProcessor:
         if self.next_processor and hasattr(self.next_processor, 'shutdown'):
             self.next_processor.shutdown()
     
-    def force_flush(self, timeout_millis: int = 30000):
-        """Force flush - pass through to next processor."""
-        if self.next_processor and hasattr(self.next_processor, 'force_flush'):
+    def force_flush(self, timeout_millis: int = 30000, timeout: Optional[float] = None):
+        """
+        Force flush - pass through to next processor.
+
+        OTel calls this with timeout_millis; Traccia's provider and stop_tracing()
+        pass timeout in seconds. The next processor gets its own convention.
+        """
+        if not (self.next_processor and hasattr(self.next_processor, 'force_flush')):
+            return True
+        if timeout is not None:
+            timeout_millis = int(timeout * 1000)
+        if isinstance(self.next_processor, OTelSpanProcessor):
             return self.next_processor.force_flush(timeout_millis)
-        return True
+        return self.next_processor.force_flush(timeout=timeout_millis / 1000.0)

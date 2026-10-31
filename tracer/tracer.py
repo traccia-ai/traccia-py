@@ -241,3 +241,20 @@ class Tracer:
             except Exception:
                 # Processors should not crash tracing
                 pass
+
+    def _run_ended_processors(self, span: "Span") -> None:
+        """
+        Notify enrichment processors once Span.end() has marked the span ended.
+
+        Args:
+            span: Traccia Span instance (ended, immutable)
+        """
+        for processor in self._provider._enrichment_processors:
+            on_ended = getattr(processor, "on_ended", None)
+            if on_ended is None:
+                continue
+            try:
+                on_ended(span)
+            except Exception:
+                # Processors should not crash tracing
+                pass

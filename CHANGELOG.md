@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `compute_cost()`, `compute_cost_detail()`, and `match_pricing_model_key()` take an optional `vendor`
 - `PriceMatch.ambiguous` is true when the vendor did not settle which of several providers' keys was used
 - `enforce_llm_call()` takes an optional `vendor` and sends it with the policy check, so Spend Cap uses that provider's price. The OpenAI, Anthropic and Gemini integrations pass it
+- `BatchSpanProcessor` takes `shutdown_timeout_millis` (default 30000). `shutdown()` waits that long for exports to finish; if one is still running, the exporter is left open instead of being closed under it
+- Enrichment processors can implement `on_ended(span)`, called by `Span.end()` after the span is ended
 
 ### Fixed
 - The API key and endpoint passed to `init()` are now used by policy checks, `@govern` status checks, prompts and evals, not only by tracing. Before, policy checks were skipped with `missing_credentials` and `load_prompt` raised `PromptFetchError` unless the key was also in the environment or a config file. Arguments passed to a single call still take priority
@@ -20,9 +22,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A model listed by several providers is priced at the calling provider's rate. `gpt-oss-120b` on a Groq span took `azure_ai/gpt-oss-120b` and now takes `groq/openai/gpt-oss-120b`
 - Gemini calls (`llm.vendor` `google_gemini`) are priced at the Gemini API rate instead of Vertex AI's. A vendor matches its pricing provider family (`bedrock` also covers `bedrock_converse`), with aliases where the names differ (`google_gemini` is `gemini`)
 - A dated model name uses its own dated price when the pricing table has one
+- Spans exported through the console or file exporter (`BatchSpanProcessor`) are no longer lost when the queue is flushed while they are still ending, or when they end during `stop_tracing()`
+- `stop_tracing()` shuts down the exporters the SDK created, after their last export, and never exports from two threads at once
+- `stop_tracing()` no longer raises `TypeError` with `max_spans_per_second` set, and `force_flush()` reaches the batch processor behind the rate limiter
 
 ### Changed
 - No more prefix matching: a model name that matches no pricing key after the steps above (for example a fine-tuned `gpt-4o-mini-ft-…`) gets no cost instead of the price of a model whose name it starts with
+- `stop_tracing()` leaves an exporter passed to `start_tracing(exporter=...)` open; shutting it down is up to the caller. `stop_tracing(flush_timeout=...)` still flushes first; without it, `shutdown()` does the final flush
 
 ## [0.1.33] - 2026-10-21
 
