@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `enforce_llm_call()` takes an optional `vendor` and sends it with the policy check, so Spend Cap uses that provider's price. The OpenAI, Anthropic and Gemini integrations pass it
 
 ### Fixed
+
+- Restore completion text and native finish reasons in synchronous OpenAI chat traces, including provider content-filter detection.
 - The API key and endpoint passed to `init()` are now used by policy checks, `@govern` status checks, prompts and evals, not only by tracing. Before, policy checks were skipped with `missing_credentials` and `load_prompt` raised `PromptFetchError` unless the key was also in the environment or a config file. Arguments passed to a single call still take priority
 - With an API key but no endpoint, policy checks now go to the default endpoint that traces use, instead of being skipped
 - Model ids with an organisation prefix (`openai/gpt-oss-120b`, `qwen/qwen3-32b` on Groq) get a cost. They previously matched no pricing key
