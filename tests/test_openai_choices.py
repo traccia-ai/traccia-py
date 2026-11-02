@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import traccia
@@ -37,13 +38,13 @@ from traccia.tracer.provider import TracerProvider
         ([{}], "0.missing.value", "fallback"),
     ],
 )
-def test_safe_get_indexed_paths(value, path, expected):
+def test_safe_get_indexed_paths(value: Any, path: str, expected: Any) -> None:
     """Preserve falsy values and mapping keys; unavailable paths use the default."""
     assert instrumentation._safe_get(value, path, "fallback") == expected
 
 
 @pytest.mark.parametrize("mode", ["text", "filtered", "tool_only", "empty"])
-def test_sdk_chat_choice_attributes(monkeypatch, mode):
+def test_sdk_chat_choice_attributes(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     """Retain SDK choices through real HTTP decoding and OTel span export."""
     openai = pytest.importorskip("openai")
     try:
@@ -69,7 +70,7 @@ def test_sdk_chat_choice_attributes(monkeypatch, mode):
     }[mode]
     requests = []
 
-    def respond(request):
+    def respond(request: Any) -> Any:
         requests.append(request)
         assert request.url.path == "/v1/chat/completions"
         message = {"role": "assistant", "content": content}
