@@ -87,13 +87,20 @@ def _record_llm_metrics(
         pass
 
 
-def _safe_get(obj, path: str, default=None):
+def _safe_get(obj: Any, path: str, default: Any = None) -> Any:
     cur = obj
     for part in path.split("."):
         if cur is None:
             return default
         if isinstance(cur, dict):
             cur = cur.get(part)
+        elif isinstance(cur, (list, tuple)):
+            if not part.isdecimal():
+                return default
+            try:
+                cur = cur[int(part)]
+            except (IndexError, ValueError):
+                return default
         else:
             cur = getattr(cur, part, None)
     return cur if cur is not None else default
