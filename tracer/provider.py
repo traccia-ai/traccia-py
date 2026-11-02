@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 from opentelemetry.sdk.trace import TracerProvider as OTelTracerProvider
 from opentelemetry.sdk.trace import SpanProcessor as OTelSpanProcessor
 from opentelemetry.sdk.resources import Resource as OTelResource
+from opentelemetry.sdk.trace.sampling import Sampler as OTelSampler
+from opentelemetry.sdk.trace.sampling import SamplingResult as OTelSamplingResult
 
 
 class SpanProcessor:
@@ -37,6 +39,28 @@ class SpanProcessor:
     def force_flush(self, timeout: Optional[float] = None) -> None:
         """Force flush any pending spans."""
         pass
+
+
+class _SwitchableSampler(OTelSampler):
+    """
+    OTel sampler that forwards to a replaceable delegate.
+
+    OTel tracers capture the provider's sampler when they are created and the
+    provider caches them per scope, so assigning a new sampler to the provider
+    would not reach tracers that already exist. Installing this once and
+    swapping its delegate changes sampling for every tracer immediately.
+    """
+
+    def __init__(self, delegate: OTelSampler) -> None:
+        self.delegate = delegate
+
+    def should_sample(self, parent_context, trace_id, name, kind=None, attributes=None, links=None, trace_state=None) -> OTelSamplingResult:
+        return self.delegate.should_sample(
+            parent_context, trace_id, name, kind=kind, attributes=attributes, links=links, trace_state=trace_state
+        )
+
+    def get_description(self) -> str:
+        return self.delegate.get_description()
 
 
 class TracerProvider:
@@ -70,6 +94,11 @@ class TracerProvider:
         
         # Optional sampler used for head-based sampling at trace start
         self.sampler: Optional[Any] = None
+        # OTel's own default (env-configured or parent-based always-on), restored by set_sampler(None).
+        # Installed behind a switch before any tracer exists, so set_sampler reaches every tracer.
+        self._default_otel_sampler: OTelSampler = self._otel_provider.sampler
+        self._sampler_switch = _SwitchableSampler(self._default_otel_sampler)
+        self._otel_provider.sampler = self._sampler_switch
 
     def get_tracer(self, name: str) -> "Tracer":
         """
@@ -108,18 +137,25 @@ class TracerProvider:
 
     def set_sampler(self, sampler: Any) -> None:
         """
-        Set the sampler.
-        
-        Note: OTel samplers are set at provider creation time.
-        This method stores the sampler for reference but doesn't
-        apply it dynamically. For dynamic sampling, recreate the provider.
-        
+        Set the sampler and apply it to the OTel provider.
+
+        Takes effect for every span started after this call, including spans
+        from tracers created earlier. Child spans follow their parent's decision.
+
         Args:
-            sampler: Sampler instance
+            sampler: Traccia Sampler, OTel Sampler, or None to restore the OTel default
         """
         self.sampler = sampler
-        # Note: OTel doesn't support dynamic sampler changes
-        # The sampler would need to be set at provider creation
+        self._sampler_switch.delegate = self._resolve_otel_sampler(sampler)
+
+    def _resolve_otel_sampler(self, sampler: Any) -> OTelSampler:
+        if sampler is None:
+            return self._default_otel_sampler
+        if isinstance(sampler, OTelSampler):
+            return sampler
+        if hasattr(sampler, "to_otel_sampler"):
+            return sampler.to_otel_sampler()
+        raise TypeError(f"Unsupported sampler type: {type(sampler).__name__}")
 
     def get_sampler(self) -> Optional[Any]:
         """Get the current sampler."""

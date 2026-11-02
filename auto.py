@@ -517,8 +517,11 @@ def start_tracing(
         existing_attrs.update(resource_attrs)
         # Create new resource with merged attributes
         new_resource = OTelResource.create(existing_attrs)
-        # Recreate OTel provider with updated resource
-        provider._otel_provider = OTelTracerProvider(resource=new_resource)
+        # Recreate OTel provider with updated resource, keeping its sampler
+        provider._otel_provider = OTelTracerProvider(
+            resource=new_resource,
+            sampler=provider._otel_provider.sampler,
+        )
         # Re-add any existing export processors to the new provider
         for proc in provider._export_processors:
             provider._otel_provider.add_span_processor(proc)
@@ -553,12 +556,10 @@ def start_tracing(
         )
 
     sampler = Sampler(sample_rate)
-    # Use the sampler at trace start (head sampling) and also to make the
-    # batch processor respect trace_flags.
-    try:
-        provider.set_sampler(sampler)
-    except Exception:
-        pass
+    # Applies parent-based head sampling to the OTel provider, so unsampled
+    # traces are non-recording at span creation and every export path skips
+    # them. The custom BatchSpanProcessor also drops trace_flags=0 spans.
+    provider.set_sampler(sampler)
 
     # Ordering matters: enrich spans before batching/export.
     if enable_token_counting:

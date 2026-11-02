@@ -29,8 +29,22 @@ class Tracer:
         self._provider = provider
         self.instrumentation_scope = instrumentation_scope
         
-        # Get OTel tracer from provider's OTel provider
-        self._otel_tracer: OTelTracer = provider._otel_provider.get_tracer(instrumentation_scope)
+        self._otel_tracer_cache: Optional[OTelTracer] = None
+        self._otel_tracer_source: Optional[Any] = None
+
+    @property
+    def _otel_tracer(self) -> OTelTracer:
+        """
+        OTel tracer from the provider's current OTel provider.
+
+        start_tracing() can replace the OTel provider (new resource) after this
+        tracer was created, so re-fetch when the provider changes.
+        """
+        otel_provider = self._provider._otel_provider
+        if self._otel_tracer_cache is None or self._otel_tracer_source is not otel_provider:
+            self._otel_tracer_cache = otel_provider.get_tracer(self.instrumentation_scope)
+            self._otel_tracer_source = otel_provider
+        return self._otel_tracer_cache
 
     def start_span(
         self,
@@ -108,32 +122,10 @@ class Tracer:
                 from traccia.utils.helpers import format_span_id
                 parent_span_id = format_span_id(current_span.get_span_context().span_id)
         
-        # Handle sampling
-        sampler = getattr(self._provider, "sampler", None)
-        if sampler and otel_parent_context is None:
-            # New root trace - check sampler
-            try:
-                sampled = bool(sampler.should_sample().sampled)
-                if not sampled:
-                    # Create a non-recording span for unsampled traces
-                    from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
-                    from opentelemetry.trace.id_generator import RandomIdGenerator
-                    
-                    id_generator = RandomIdGenerator()
-                    trace_id = id_generator.generate_trace_id()
-                    span_id = id_generator.generate_span_id()
-                    
-                    unsampled_context = SpanContext(
-                        trace_id=trace_id,
-                        span_id=span_id,
-                        is_remote=False,
-                        trace_flags=TraceFlags(0),  # Not sampled
-                    )
-                    unsampled_span = NonRecordingSpan(unsampled_context)
-                    otel_parent_context = set_span_in_context(unsampled_span)
-            except Exception:
-                pass
-        
+        # Sampling is decided by the OTel provider's sampler at span creation
+        # (see TracerProvider.set_sampler). Unsampled spans are non-recording,
+        # carry trace_flags=0, and are never handed to export processors.
+
         # Debug override: if enabled, force sampling for new traces
         if otel_parent_context is None and runtime_config.get_debug():
             pass  # OTel will handle this
@@ -150,7 +142,7 @@ class Tracer:
         
         # Wrap in Traccia Span
         from traccia.tracer.span import Span
-        return Span(otel_span, self, parent_span_id)
+        return Span(otel_span, self, parent_span_id, name=name, attributes=attributes)
 
     def start_as_current_span(
         self,
@@ -184,10 +176,10 @@ class Tracer:
         otel_span = get_current_span()
         if otel_span and otel_span.get_span_context().is_valid:
             from traccia.tracer.span import Span
-            # Check if we already have a Traccia wrapper
-            if hasattr(otel_span, '_traccia_tracer'):
-                # Try to return existing wrapper (best effort)
-                pass
+            # Unsampled spans keep their attributes only on the original wrapper
+            existing = getattr(otel_span, '_traccia_span', None)
+            if existing is not None:
+                return existing
             return Span(otel_span, self)
         return None
     
