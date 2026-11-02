@@ -9,6 +9,7 @@ import os
 from typing import Any, Callable, Optional
 
 from traccia import observe, runtime_config
+from traccia.governance.evidence import governed_run
 from traccia.governance.policy import check_agent_status
 
 logger = logging.getLogger("traccia.governance")
@@ -73,13 +74,13 @@ def govern(agent_id: Optional[str] = None, fail_open: bool = True, **observe_kwa
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             _enforce_or_warn()
-            with runtime_config.run_identity(**_run_kwargs()):
+            with runtime_config.run_identity(**_run_kwargs()), governed_run():
                 return observed_func(*args, **kwargs)
 
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
             _enforce_or_warn()
-            with runtime_config.run_identity(**_run_kwargs()):
+            with runtime_config.run_identity(**_run_kwargs()), governed_run():
                 return await observed_func(*args, **kwargs)
 
         return async_wrapper if inspect.iscoroutinefunction(func) else sync_wrapper

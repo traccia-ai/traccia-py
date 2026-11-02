@@ -313,6 +313,16 @@ class Span:
         
         self._ended = True
 
+        # 4. The run is over once its local root span ends; drop its policy evidence.
+        # Ask the OTel span: wrappers from get_current_span() carry no parent_span_id.
+        if getattr(self._otel_span, "parent", False) is None:
+            try:
+                from traccia.governance.evidence import forget_trace
+
+                forget_trace(self.context.trace_id)
+            except Exception:
+                pass
+
     # Context manager support
     def __enter__(self) -> "Span":
         """Enter context manager."""
