@@ -4,6 +4,19 @@ All notable changes to the Traccia Python SDK (`pip install traccia`) are docume
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/). Dates are the PyPI publish date (UTC).
 
+## [Unreleased]
+
+### Added
+- Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read to the end, closed, or garbage collected. Read to the end, it records the full completion, token usage, and cost
+- A streamed call settles for the agent that made it, even if the stream is read under another `run_identity` or after it exits. Cancellation (`asyncio.CancelledError`) and `KeyboardInterrupt` end the span with an error; the governance reservation is released if nothing was received yet, otherwise an estimate of what was received is charged
+- A stream that fails or is cancelled keeps the text received so far on its span. A stream dropped without being finished is finalized (span ended, request aborted, settled) on a background thread, never inside garbage collection, which can run while the thread holds a lock that finalizing needs, such as the HTTP connection pool's
+- A Groq stream dropped without being finished or closed has its request aborted, so Groq stops generating it, and is charged its reservation unless Groq reported usage. A stream stopped with `break` and then closed still settles an estimate of what was streamed
+- A Groq call settled from an estimate (no usage reported) is priced locally like reported usage, so a pricing override applies to it
+- A Groq call with output but no reported usage (a stream stopped, closed, or failed partway, or a response without usage) records the estimated token counts it is charged on its span, with `llm.usage.source` set to `estimated`, so the span's cost matches the charge. Reasoning and tool call arguments count as output. A stream dropped unfinished or still open at shutdown is charged its reservation, but its span records the same estimate of what it produced
+- `stop_tracing()` and interpreter exit end and settle Groq calls still in flight (open streams, requests not yet returned): charged their reported usage, or their reservation when it is unknown, within the `stop_tracing(flush_timeout=...)` limit (10 seconds by default). Their spans end with `llm.interrupted` set to `shutdown`. A call the Spend Cap reserved budget for is also stopped (its stream's request aborted), which bounds what Groq bills against the reservation; a call with nothing reserved is left running for whoever reads it, and is stopped if its stream is dropped later. The same applies to a stream returned afterwards by a request that was still in flight. This work runs on its own thread, so `stop_tracing()` called from a signal handler that interrupted an HTTP request does not deadlock. An async stream is stopped on its event loop, also when `stop_tracing()` runs on another thread. A call still in its policy check is settled once the check returns: `stop_tracing()` waits for it within the limit, and a check that returns later settles the reservation it made then
+- A Groq call settles with the API key, endpoint, and agent of its policy check, so a settle that runs after `stop_tracing()` (a stream read later, or a settle still in the background) is not skipped
+- Calls made through `with_raw_response` are traced, also with `stream=True`: the stream returned by `.parse()` records the completion and token usage. A call made through `with_streaming_response`, whose body you read yourself, ends its span when the call returns and is charged its reservation
+
 ## [0.1.34] - 2026-11-03
 
 ### Changed
