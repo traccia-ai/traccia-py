@@ -13,6 +13,9 @@ class GovernanceConfig:
     status_check_endpoint: Optional[str] = None
     post_block_endpoint: Optional[str] = None
     status_cache_ttl_seconds: int = 60
+    # Local fail mode override for this process (TRC-342): "open", "closed" or None
+    # (follow the customer's setting in Traccia). Applies only when Traccia gives no answer.
+    policy_fail_mode: Optional[str] = None
 
 
 gov_config = GovernanceConfig()
@@ -23,6 +26,7 @@ def configure_governance(
     status_check_endpoint: Optional[str] = None,
     post_block_endpoint: Optional[str] = None,
     status_cache_ttl_seconds: Optional[int] = None,
+    policy_fail_mode: Optional[str] = None,
     config_file: Optional[str] = None,
 ) -> None:
     """
@@ -55,3 +59,9 @@ def configure_governance(
         ttl = gov_section.get("status_cache_ttl_seconds")
     if ttl is not None:
         gov_config.status_cache_ttl_seconds = int(ttl)
+
+    from traccia.governance import fail_mode
+
+    fail_mode.reset()  # a new init starts without a remembered setting
+    mode = policy_fail_mode if policy_fail_mode is not None else gov_section.get("policy_fail_mode")
+    gov_config.policy_fail_mode = fail_mode.validate_mode(mode)

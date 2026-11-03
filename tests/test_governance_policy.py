@@ -71,7 +71,7 @@ def test_check_agent_status_allowed(mock_credentials, mock_session):
     mock_response.json.return_value = {"status": "allowed"}
     mock_session.get.return_value = mock_response
 
-    check_agent_status("agent-1", fail_open=True)
+    check_agent_status("agent-1")
     mock_session.get.assert_called_once()
     args, kwargs = mock_session.get.call_args
     assert args[0] == "https://api.traccia.ai/api/v1/agents/agent-1/status"
@@ -89,39 +89,41 @@ def test_check_agent_status_hard_block(mock_credentials, mock_session):
     mock_session.get.return_value = mock_response
 
     with pytest.raises(AgentBlockedError):
-        check_agent_status("agent-1", fail_open=False)
+        check_agent_status("agent-1", policy_fail_mode="open")    # a block beats the override
 
 
 @patch("traccia.governance.policy._http_session")
 @patch("traccia.governance.policy.client_config.resolve_credentials")
-def test_check_agent_status_fail_open_on_http_error(mock_credentials, mock_session):
+def test_check_agent_status_open_override_on_http_error(mock_credentials, mock_session):
     gov_config.status_check_endpoint = None
     mock_credentials.return_value = ("key", "https://api.traccia.ai/v1/traces")
     mock_session.get.side_effect = TimeoutError("timeout")
 
-    check_agent_status("agent-1", fail_open=True)
+    check_agent_status("agent-1", policy_fail_mode="open")
 
 
 @patch("traccia.governance.policy._http_session")
 @patch("traccia.governance.policy.client_config.resolve_credentials")
-def test_check_agent_status_fail_closed_on_http_error(mock_credentials, mock_session):
+def test_check_agent_status_blocks_on_http_error_by_default(mock_credentials, mock_session):
     gov_config.status_check_endpoint = None
     mock_credentials.return_value = ("key", "https://api.traccia.ai/v1/traces")
     mock_session.get.side_effect = TimeoutError("timeout")
 
     with pytest.raises(AgentBlockedError):
-        check_agent_status("agent-1", fail_open=False)
+        check_agent_status("agent-1")
 
 
-@patch("traccia.governance.policy._fetch_and_apply_status")
-def test_inflight_coalescing(mock_fetch):
-    barrier = threading.Barrier(2)
+@patch("traccia.governance.policy.client_config.resolve_credentials",
+       return_value=("key", "https://api.traccia.ai/v1/traces"))
+@patch("traccia.governance.policy._fetch_status")
+def test_inflight_coalescing(mock_fetch, _credentials):
     call_count = {"n": 0}
 
-    def slow_fetch(agent_id, *, fail_open):
+    def slow_fetch(api_key, base_url, status_url, agent_id):
         call_count["n"] += 1
-        barrier.wait(timeout=2)
-        policy_module._status_cache.set(agent_id, "allowed", None)
+        time.sleep(0.2)  # hold the shared fetch open while the second caller arrives
+        policy_module._status_cache.set(policy_module._status_key(api_key, status_url), "allowed", None)
+        return "ok", {"status": "allowed"}
 
     mock_fetch.side_effect = slow_fetch
 
@@ -129,7 +131,7 @@ def test_inflight_coalescing(mock_fetch):
 
     def worker():
         try:
-            check_agent_status("agent-coalesce", fail_open=True)
+            check_agent_status("agent-coalesce")
         except Exception as exc:
             errors.append(exc)
 
@@ -154,21 +156,14 @@ _NO_ENDPOINT = ("key", None)
 )
 @patch("traccia.governance.policy._http_session")
 @patch("traccia.governance.policy.client_config.resolve_credentials")
-def test_check_agent_status_fail_closed_without_credentials(mock_credentials, mock_session, credentials, message):
+def test_check_agent_status_without_credentials_is_a_configuration_error(
+    mock_credentials, mock_session, credentials, message
+):
+    from traccia.governance.policy import GovernanceConfigError
+
     mock_credentials.return_value = credentials
 
-    with pytest.raises(AgentBlockedError) as exc:
-        check_agent_status("agent-1", fail_open=False)
+    with pytest.raises(GovernanceConfigError) as exc:
+        check_agent_status("agent-1", policy_fail_mode="open")    # no override allows it
     assert message in str(exc.value)
-    assert "fail_open is False" in str(exc.value)
-    mock_session.get.assert_not_called()
-
-
-@pytest.mark.parametrize("credentials", [_NO_KEY, _NO_ENDPOINT])
-@patch("traccia.governance.policy._http_session")
-@patch("traccia.governance.policy.client_config.resolve_credentials")
-def test_check_agent_status_fail_open_without_credentials(mock_credentials, mock_session, credentials):
-    mock_credentials.return_value = credentials
-
-    check_agent_status("agent-1", fail_open=True)
     mock_session.get.assert_not_called()

@@ -42,6 +42,19 @@ _auto_trace_context: Optional[Any] = None  # Context for auto-started trace
 _auto_trace_name: str = "root"  # Default name for auto-started trace
 
 
+def _configure_governance(config: dict, config_file: Optional[str]) -> None:
+    """Apply governance settings from init() and drop them from *config* (start_tracing() does not take them)."""
+    from traccia.governance.config import configure_governance
+
+    configure_governance(
+        status_check_endpoint=config.pop("status_check_endpoint", None),
+        post_block_endpoint=config.pop("post_block_endpoint", None),
+        status_cache_ttl_seconds=config.pop("status_cache_ttl_seconds", None),
+        policy_fail_mode=config.pop("policy_fail_mode", None),
+        config_file=config_file,
+    )
+
+
 def init(
     api_key: Optional[str] = None,
     *,
@@ -63,7 +76,10 @@ def init(
         auto_start_trace: If True, automatically start a root trace (default: True)
         auto_trace_name: Name for auto-started trace (default: "root")
         config_file: Optional explicit path to config file
-        **kwargs: All parameters from start_tracing() can be passed here
+        **kwargs: All parameters from start_tracing() can be passed here, plus
+            policy_fail_mode ("open" or "closed"): overrides your Traccia setting for
+            what @govern policy checks do when Traccia gives no answer. Default: follow
+            the setting (Settings -> Policy Enforcement), else block.
         
     Returns:
         TracerProvider instance
@@ -85,6 +101,9 @@ def init(
                 "Calling init() will not re-initialize. "
                 "Use stop_tracing() first if you need to re-initialize."
             )
+        # Tracing stays as it is, but policy checks start afresh (TRC-342): no
+        # remembered fail mode, and this call's policy_fail_mode applies.
+        _configure_governance(kwargs, config_file)
         return _get_provider()
     
     # Load config file if exists (lowest priority)
@@ -130,14 +149,7 @@ def init(
     merged_config.update(rate_limit_config)
 
     # Optional advanced governance overrides (defaults derive from tracing endpoint)
-    from traccia.governance.config import configure_governance
-
-    configure_governance(
-        status_check_endpoint=merged_config.pop("status_check_endpoint", None),
-        post_block_endpoint=merged_config.pop("post_block_endpoint", None),
-        status_cache_ttl_seconds=merged_config.pop("status_cache_ttl_seconds", None),
-        config_file=config_file,
-    )
+    _configure_governance(merged_config, config_file)
     
     # Initialize via start_tracing with full config
     provider = start_tracing(**merged_config)

@@ -3,7 +3,7 @@
 from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace, force_flush
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
-from traccia.governance import govern, AgentBlockedError, ApprovalPending, pending_tool_result, check_policy
+from traccia.governance import govern, AgentBlockedError, ApprovalPending, GovernanceConfigError, pending_tool_result, check_policy
 from traccia.context import (
     get_current_span,
     run_with_span,
@@ -108,6 +108,7 @@ __all__ = [
     "observe",
     "govern",
     "AgentBlockedError",
+    "GovernanceConfigError",
     "ApprovalPending",
     "pending_tool_result",
     "check_policy",

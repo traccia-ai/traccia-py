@@ -1339,7 +1339,7 @@ client = OpenAI()
 def lookup_order(order_id: str) -> dict:
     return {"order_id": order_id, "status": "shipped"}
 
-@govern(fail_open=False, name="run_agent")
+@govern(name="run_agent")
 def run_agent(prompt: str) -> str:
     lookup_order("ORD-1")
     resp = client.chat.completions.create(
@@ -1354,9 +1354,18 @@ except AgentBlockedError as exc:
     print(exc.reasons, exc.decision_id, exc.remaining_budget_usd)
 ```
 
-Identity comes from `init(agent_id=...)` (or `TRACCIA_AGENT_ID`). Pass `agent_id` on `@govern` only to override in a multi-agent process. `fail_open=True` (default) lets the agent continue if Traccia is unreachable. On Block deny, `@govern` raises `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `@govern` raises `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pending_tool_result()` is a normal tool result when a framework retries raised errors.
+Identity comes from `init(agent_id=...)` (or `TRACCIA_AGENT_ID`). Pass `agent_id` on `@govern` only to override in a multi-agent process. Without an agent ID, API key or endpoint, `@govern` raises `GovernanceConfigError` (a subclass of `AgentBlockedError`) instead of running unchecked. On Block deny, `@govern` raises `AgentBlockedError`. Observe and Warn still let the call proceed and record a match. Refund Guard and Purchase Guard can hold a middle amount: `@govern` raises `ApprovalPending`, which is not `AgentBlockedError`. Catch it, do not run the tool, and do not retry the check. `pending_tool_result()` is a normal tool result when a framework retries raised errors.
 
 For a custom tool that is **not** wrapped with `@observe(as_type="tool")`, call `check_policy(action={"type": "tool_call", "name": "refund"}, context={"input": {"amount": amount}})` yourself.
+
+#### When Traccia can't be reached
+
+If a check gets no answer (timeout, connection error, 5xx, or an invalid answer), the call follows your **policy fail mode**: **Settings → Policy Enforcement** in the app, for the organization or one workspace. The default is to block: the call raises `AgentBlockedError`, and the provider or tool is never called. Choose Allow there to let calls through while Traccia is down.
+
+- The setting arrives with answers the SDK already gets: the agent status at the start of each `@govern` run (cached 60 s) and each policy check. There are no extra requests, and tracing-only code never calls Traccia for it.
+- It is kept for 10 minutes after the last answer that carried it, then the SDK goes back to blocking. A process that has had no answer yet, for example one that starts while Traccia is down, blocks. Calling `init()` again forgets it.
+- A local override applies only when there is no answer: `init(policy_fail_mode="open" | "closed")` for the process, or `@govern(policy_fail_mode=...)` for one run and the checks inside it. It never overrides a rejected API key (401/403), a block, a deny or a configuration error. The SDK logs a warning once when it disagrees with your Traccia setting, since the [Traccia Gateway](https://traccia.ai/docs/platform/gateway) follows the setting.
+- `@govern(fail_open=...)` is deprecated: `True` means `policy_fail_mode="open"`, `False` means `"closed"`. Omit it to follow your setting.
 
 Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK guide: [Governance in the SDK](https://traccia.ai/docs/sdk/governance).
 
@@ -1367,9 +1376,10 @@ Policies in the app: [Policies](https://traccia.ai/docs/platform/policies). SDK 
 status_check_endpoint = "https://custom.example/agents/{agent_id}/status"
 post_block_endpoint = "https://custom.example/agents/{agent_id}/blocks"
 status_cache_ttl_seconds = 120
+policy_fail_mode = "closed"   # optional local override, see above
 ```
 
-Or pass `status_check_endpoint`, `post_block_endpoint`, or `status_cache_ttl_seconds` to `init()`.
+Or pass `status_check_endpoint`, `post_block_endpoint`, `status_cache_ttl_seconds`, or `policy_fail_mode` to `init()`.
 
 ### Human review (platform only)
 
