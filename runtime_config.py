@@ -14,7 +14,9 @@ _run_env: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("tracci
 _run_tenant_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_tenant_id", default=None)
 _run_project_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_project_id", default=None)
 _run_pep_enabled: contextvars.ContextVar[bool] = contextvars.ContextVar("traccia_run_pep_enabled", default=False)
-_run_pep_fail_open: contextvars.ContextVar[bool] = contextvars.ContextVar("traccia_run_pep_fail_open", default=True)
+# The @govern run's local fail mode override ("open"/"closed"), or None: use init's, else the
+# customer's setting (TRC-342). Per run, so concurrent runs never see each other's.
+_run_pep_fail_mode: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_run_pep_fail_mode", default=None)
 
 # Global runtime configuration state
 _config = {
@@ -148,9 +150,9 @@ def pep_enabled() -> bool:
     return bool(_run_pep_enabled.get())
 
 
-def pep_fail_open() -> bool:
-    """False when the current @govern run asked for fail-closed policy checks."""
-    return bool(_run_pep_fail_open.get())
+def pep_fail_mode() -> Optional[str]:
+    """The current @govern run's local fail mode override, or None."""
+    return _run_pep_fail_mode.get()
 
 
 def set_debug(value: bool) -> None:
@@ -208,7 +210,7 @@ def run_identity(
     tenant_id: Optional[str] = None,
     project_id: Optional[str] = None,
     pep_enabled: Optional[bool] = None,
-    pep_fail_open: Optional[bool] = None,
+    pep_fail_mode: Optional[str] = None,
 ):
     """
     Context manager to set run-scoped agent identity for the current context (e.g. one request).
@@ -231,8 +233,8 @@ def run_identity(
             resets.append((_run_project_id, _run_project_id.set(project_id)))
         if pep_enabled is not None:
             resets.append((_run_pep_enabled, _run_pep_enabled.set(bool(pep_enabled))))
-        if pep_fail_open is not None:
-            resets.append((_run_pep_fail_open, _run_pep_fail_open.set(bool(pep_fail_open))))
+        if pep_fail_mode is not None:
+            resets.append((_run_pep_fail_mode, _run_pep_fail_mode.set(pep_fail_mode)))
         yield
     finally:
         for var, token in reversed(resets):

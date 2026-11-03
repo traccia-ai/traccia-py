@@ -9,13 +9,21 @@ import time
 from typing import Any, Dict, Optional
 
 from traccia import client_config
-from traccia.governance import evidence
-from traccia.governance.policy import AgentBlockedError, ApprovalPending, _derive_base_url, _http_session
+from traccia.governance import evidence, fail_mode
+from traccia.governance.policy import (
+    AgentBlockedError,
+    ApprovalPending,
+    GovernanceConfigError,
+    _derive_base_url,
+    _http_session,
+    rejected_error,
+)
 from traccia import runtime_config
 
 logger = logging.getLogger("traccia.governance")
 
 CHECK_PATH = "/api/v1/policy/check"
+DECISION_EFFECTS = ("allow", "warn", "reshape", "queue", "deny")
 SETTLE_PATH = "/api/v1/policy/settle"
 _BUDGET_CACHE_TTL_S = 5.0
 _budget_lock = threading.Lock()
@@ -290,16 +298,32 @@ def _customer_id(arguments: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _unresolved(reason: str, detail: str, *, warn: bool = True) -> Dict[str, Any]:
-    """No decision from Traccia. Allow, unless the @govern run is fail-closed."""
-    if not runtime_config.pep_fail_open():
-        logger.error("policy check could not complete (%s); blocking call (fail_open=False)", detail)
+def valid_decision(decision: Any) -> bool:
+    """Accept only a decision the SDK can act on; anything else counts as no answer."""
+    return (
+        isinstance(decision, dict)
+        and decision.get("effect") in DECISION_EFFECTS
+        and isinstance(decision.get("would_have"), bool)
+        and fail_mode.valid_fields(decision)
+    )
+
+
+def _unresolved(ident: fail_mode.Identity, started_at: float, reason: str, detail: str) -> Dict[str, Any]:
+    """No decision from Traccia: apply the fail mode (TRC-342).
+
+    A rejection of the key after this check was sent wins over any fail mode.
+    """
+    rejected = fail_mode.rejected_since(ident, started_at)
+    if rejected:
+        raise rejected_error(rejected)
+    mode = fail_mode.resolve(ident, fail_mode.local_mode())
+    if mode == "closed":
+        logger.error("policy check could not complete (%s); blocking call (policy fail mode: closed)", detail)
         raise AgentBlockedError(
-            f"Policy check could not complete ({detail}). Blocking because fail_open is False.",
+            f"Policy check could not complete ({detail}). Blocking because the policy fail mode is closed.",
             reasons=[reason],
         )
-    if warn:
-        logger.warning("policy check could not complete (%s); allowing call", detail)
+    logger.warning("policy check could not complete (%s); allowing call (policy fail mode: open)", detail)
     return {"effect": "allow", "would_have": False, "reasons": [reason]}
 
 
@@ -309,14 +333,22 @@ def check_policy(
     context: Optional[Dict[str, Any]] = None,
     resource: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """POST /api/v1/policy/check. Safe to call from custom tools; @govern uses this automatically."""
+    """POST /api/v1/policy/check. Safe to call from custom tools; @govern uses this automatically.
+
+    Deny raises AgentBlockedError and a queued approval raises ApprovalPending. When
+    Traccia gives no answer, the fail mode applies (see traccia.governance.fail_mode).
+    A rejected API key, or a missing API key, endpoint or agent ID, always raises.
+    """
     api_key, endpoint = _credentials()
     if not api_key or not endpoint:
-        return _unresolved("missing_credentials", "Traccia API key or endpoint not set", warn=False)
+        raise GovernanceConfigError(
+            "Traccia API key or endpoint not set. Policy checks need both "
+            "(TRACCIA_API_KEY and TRACCIA_ENDPOINT, or init())."
+        )
     agent_id = _agent_id()
     if not agent_id:
-        return _unresolved(
-            "missing_agent_id", "no agent_id on init, @govern, or TRACCIA_AGENT_ID", warn=False
+        raise GovernanceConfigError(
+            "No agent_id on init, @govern, or TRACCIA_AGENT_ID. Policy checks need one."
         )
     trace_id, span_id = _trace_ids()
     payload = {
@@ -332,29 +364,42 @@ def check_policy(
     remaining = cached_remaining_budget(agent_id)
     if remaining is not None:
         payload["context"].setdefault("remaining_budget_usd", remaining)
+    base = _derive_base_url(endpoint)
+    ident = fail_mode.identity(api_key, base)
+    started_at = fail_mode._now()
     try:
-        base = _derive_base_url(endpoint)
         response = _http_session.post(
             f"{base}{CHECK_PATH}",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
             timeout=2,
         )
-        if response.status_code != 200:
-            return _unresolved(
-                "check_http_error",
-                f"HTTP {response.status_code}: {(response.text or '')[:180]}",
-            )
-        decision = response.json()
-    except AgentBlockedError:
-        raise
     except Exception as exc:
-        return _unresolved("check_error", str(exc))
+        return _unresolved(ident, started_at, "check_error", str(exc))
+    if response.status_code in fail_mode.REJECT_STATUSES:
+        fail_mode.note_rejection(ident, response.status_code)
+        raise rejected_error(response.status_code)
+    if response.status_code != 200:
+        return _unresolved(
+            ident, started_at, "check_http_error", f"HTTP {response.status_code}: {(response.text or '')[:180]}"
+        )
+    try:
+        decision = response.json()
+    except Exception as exc:
+        return _unresolved(ident, started_at, "check_error", f"invalid response: {exc}")
+    if not valid_decision(decision):
+        return _unresolved(ident, started_at, "check_error", "invalid decision")
+    rejected = fail_mode.rejected_since(ident, started_at)
+    if rejected:
+        # The key was rejected while this check was on its way: its answer, even an
+        # allow, no longer holds.
+        raise rejected_error(rejected)
+    fail_mode.note_answer(ident, decision, started_at)
     _cache_budget(agent_id, decision.get("remaining_budget_usd"))
     _stamp_span(decision)
     if decision.get("would_have"):
         return decision
-    effect = decision.get("effect") or "allow"
+    effect = decision["effect"]
     if effect == "queue":
         raise ApprovalPending(
             "This action is waiting for approval. Do not run the tool or retry the check.",
