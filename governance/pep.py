@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
+import contextvars
 import logging
 import os
+import queue
 import threading
 import time
-from typing import Any, Dict, Optional
+import weakref
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from traccia import client_config
 from traccia.governance import evidence, fail_mode
@@ -412,14 +417,56 @@ def check_policy(
     return decision
 
 
-def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, actual_usd: Optional[float] = None) -> None:
+def reserved_usd(decision: Optional[Dict[str, Any]]) -> Optional[float]:
+    """The USD amount the policy check reserved for a call, if any."""
+    reserved = ((decision or {}).get("obligations") or {}).get("reserved_usd")
+    return reserved if isinstance(reserved, (int, float)) and not isinstance(reserved, bool) else None
+
+
+SettleTarget = Tuple[Optional[str], Optional[str], Optional[str]]
+
+
+def settle_target() -> Optional[SettleTarget]:
+    """The API key, endpoint and agent a policy check run now uses, or None when checks are
+    off. Taken with the check and passed to settle_policy(), so the settle reaches the account
+    and agent that reserved, even if it runs after stop_tracing() has cleared the credentials
+    init() was given, or after a re-init."""
+    try:
+        if not runtime_config.pep_enabled():
+            return None
+        api_key, endpoint = _credentials()
+        return api_key, endpoint, _agent_id()
+    except Exception:
+        return None
+
+
+def settle_policy(
+    decision: Optional[Dict[str, Any]],
+    *,
+    release: bool = False,
+    actual_usd: Optional[float] = None,
+    model: Optional[str] = None,
+    vendor: Optional[str] = None,
+    input_tokens: Optional[float] = None,
+    output_tokens: Optional[float] = None,
+    target: Optional[SettleTarget] = None,
+) -> None:
+    """Settle the call's reservation.
+
+    Without ``actual_usd`` the server prices the call from ``model``, ``vendor`` and the
+    token counts; with none of them it releases the reservation. ``target``: the
+    settle_target() of the call's policy check; without it, the current credentials and agent.
+    """
     if not decision:
         return
     reserved = (decision.get("obligations") or {}).get("reserved_usd")
     if reserved is None:
         return
-    api_key, endpoint = _credentials()
-    agent_id = _agent_id()
+    if target is not None:
+        api_key, endpoint, agent_id = target
+    else:
+        api_key, endpoint = _credentials()
+        agent_id = _agent_id()
     if not api_key or not endpoint or not agent_id:
         return
     trace_id, _span_id = _trace_ids()
@@ -434,6 +481,10 @@ def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, 
                 "reserved_usd": reserved,
                 "actual_usd": actual_usd,
                 "release": release,
+                "model": model,
+                "vendor": vendor,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
             },
             timeout=2,
         )
@@ -441,32 +492,83 @@ def settle_policy(decision: Optional[Dict[str, Any]], *, release: bool = False, 
         logger.debug("policy settle failed: %s", exc)
 
 
+# Tokens one image is counted as in a prompt estimate, in the range vision models charge for a
+# typical image. Image parts are counted by this, never by their (base64) URL.
+IMAGE_PROMPT_TOKENS = 1000
+_IMAGE_PART_TYPES = {"image_url", "image", "input_image"}
+
+
+def _get(obj: Any, key: str) -> Any:
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def _message_text(message: Any) -> tuple[str, int]:
+    """(text, image count) of one message: its content (a string or content parts) plus any
+    tool call arguments, which are part of the prompt when the conversation is sent back."""
+    if isinstance(message, str):
+        return message, 0
+    content = _get(message, "content")
+    texts = []
+    images = 0
+    if isinstance(content, str):
+        texts.append(content)
+    elif isinstance(content, (list, tuple)):
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+                continue
+            text = _get(part, "text")
+            if isinstance(text, str):
+                texts.append(text)
+            elif _get(part, "type") in _IMAGE_PART_TYPES:
+                images += 1
+    tool_calls = _get(message, "tool_calls")
+    if isinstance(tool_calls, (list, tuple)):
+        for call in tool_calls:
+            arguments = _get(_get(call, "function"), "arguments")
+            if isinstance(arguments, str):
+                texts.append(arguments)
+    return "".join(texts), images
+
+
 def _estimate_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
     try:
-        from traccia.processors.token_counter import estimate_tokens_from_text
+        from traccia.processors.token_counter import estimate_tokens_from_text_with_source
     except Exception:
-        estimate_tokens_from_text = None
+        estimate_tokens_from_text_with_source = None
     messages = kwargs.get("messages")
     text = kwargs.get("prompt") or kwargs.get("input")
     blob = ""
-    if isinstance(messages, list):
+    images = 0
+    if isinstance(messages, (list, tuple)):
         parts = []
         for item in messages:
-            if isinstance(item, dict):
-                parts.append(str(item.get("content") or ""))
-            else:
-                parts.append(str(item))
+            message_text, message_images = _message_text(item)
+            parts.append(message_text)
+            images += message_images
         blob = "\n".join(parts)
     elif isinstance(text, str):
         blob = text
+    image_tokens = images * IMAGE_PROMPT_TOKENS
     if not blob:
-        return None
-    if estimate_tokens_from_text:
+        return image_tokens or None
+    rough = max(len(blob) // 4, 1)
+    if estimate_tokens_from_text_with_source:
         try:
-            return int(estimate_tokens_from_text(blob))
+            count, source = estimate_tokens_from_text_with_source(blob)
+            if source == "estimated.tiktoken":
+                return int(count) + image_tokens
+            # Without tiktoken the counter splits on whitespace, which counts code, JSON or
+            # unspaced text as a handful of tokens; never estimate below characters / 4.
+            return max(int(count), rough) + image_tokens
         except Exception:
             pass
-    return max(len(blob) // 4, 1)
+    return rough + image_tokens
+
+
+def estimate_prompt_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
+    """Rough prompt size in tokens, as sent with the policy check."""
+    return _estimate_tokens(kwargs)
 
 
 def enforce_llm_call(
@@ -504,8 +606,260 @@ def enforce_llm_call(
     return decision
 
 
-def finish_llm_call(decision: Optional[Dict[str, Any]], *, release: bool = False, actual_usd: Optional[float] = None) -> None:
-    settle_policy(decision, release=release, actual_usd=actual_usd)
+def finish_llm_call(
+    decision: Optional[Dict[str, Any]],
+    *,
+    release: bool = False,
+    actual_usd: Optional[float] = None,
+    model: Optional[str] = None,
+    vendor: Optional[str] = None,
+    input_tokens: Optional[float] = None,
+    output_tokens: Optional[float] = None,
+    target: Optional[SettleTarget] = None,
+) -> None:
+    settle_policy(
+        decision,
+        release=release,
+        actual_usd=actual_usd,
+        model=model,
+        vendor=vendor,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        target=target,
+    )
+
+
+_settle_executor: Optional[ThreadPoolExecutor] = None
+_settle_flush_hook = False
+_pending_settles: Set[Future] = set()
+# Reentrant, so code holding it can start a settle.
+_settle_lock = threading.RLock()
+
+
+def _settle_pool() -> ThreadPoolExecutor:
+    global _settle_executor, _settle_flush_hook
+    with _settle_lock:
+        if _settle_executor is None:
+            _settle_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="traccia-settle")
+            if not _settle_flush_hook:
+                atexit.register(flush_pending_settles)
+                _settle_flush_hook = True
+        return _settle_executor
+
+
+def _settle_done(future: Future) -> None:
+    with _settle_lock:
+        _pending_settles.discard(future)
+
+
+def finish_llm_call_in_background(decision: Optional[Dict[str, Any]], **kwargs: Any) -> None:
+    """finish_llm_call() on a worker thread, so a slow policy server does not delay the caller.
+
+    Runs in a copy of the current context, so it settles for the agent (and span) that made
+    the call. flush_pending_settles() waits for it; it also runs at interpreter exit.
+    """
+    if reserved_usd(decision) is None:
+        return  # nothing was reserved, so there is nothing to settle
+    ctx = contextvars.copy_context()
+    try:
+        future = _settle_pool().submit(ctx.run, finish_llm_call, decision, **kwargs)
+    except RuntimeError:
+        # The interpreter is shutting down (e.g. a stream finalized at exit): settle here.
+        ctx.run(finish_llm_call, decision, **kwargs)
+        return
+    with _settle_lock:
+        _pending_settles.add(future)
+    future.add_done_callback(_settle_done)
+
+
+# Work handed off by garbage-collection finalizers (a stream dropped unfinished). The collector
+# runs them on whatever thread it interrupts, possibly inside a lock that finalizing the call
+# takes (an HTTP connection pool's, ThreadPoolExecutor.submit()'s) or while other code is half
+# done, so they only put the work here: SimpleQueue.put() is safe there, as nothing else is. A
+# worker thread runs it, and run_handed_off() runs what is left (flush_pending_settles()).
+_handed_off: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
+_handoff_worker: Optional[threading.Thread] = None
+_handoff_pid: Optional[int] = None
+
+
+def hand_off(work: Callable[[], None]) -> None:
+    """Run ``work`` off the caller's thread. Safe in a garbage-collection finalizer."""
+    _handed_off.put(work)
+
+
+def start_handoff_worker() -> None:
+    """Start the hand-off worker in this process if it is not running. Call from ordinary
+    code, before a finalizer can hand work off: starting a thread takes locks."""
+    global _handoff_worker, _handoff_pid
+    with _settle_lock:
+        worker = _handoff_worker
+        if worker is not None and _handoff_pid == os.getpid() and worker.is_alive():
+            return
+        worker = threading.Thread(target=_handoff_loop, name="traccia-handoff", daemon=True)
+        worker.start()
+        _handoff_worker, _handoff_pid = worker, os.getpid()
+
+
+def _run_work(work: Callable[[], None]) -> None:
+    try:
+        work()
+    except Exception as exc:
+        logger.debug("handed-off work failed: %s", exc)
+
+
+def _handoff_loop() -> None:
+    while True:
+        _run_work(_handed_off.get())
+
+
+def run_handed_off() -> None:
+    """Run the work handed off so far that the worker has not taken, on this thread."""
+    while True:
+        try:
+            work = _handed_off.get_nowait()
+        except queue.Empty:
+            return
+        _run_work(work)
+
+
+_OFF_THREAD_GRACE_S = 0.25
+
+
+def _run_off_this_thread(work: Callable[[], None], timeout: Optional[float]) -> None:
+    """Run ``work`` on a new thread and wait for it, up to ``timeout`` seconds.
+
+    Shutdown work (stopping a call, closing its response, starting its settle) takes locks
+    that the calling thread may hold: stop_tracing() can run in a signal handler that
+    interrupted this thread inside httpcore's connection pool or ThreadPoolExecutor.submit().
+    On another thread that work waits for the lock instead of deadlocking, and this thread
+    returns at the time limit. Runs here only when no thread can be started (interpreter
+    exit).
+    """
+    done = threading.Event()
+
+    def run() -> None:
+        try:
+            _run_work(work)
+        finally:
+            done.set()
+
+    try:
+        threading.Thread(target=run, name="traccia-shutdown", daemon=True).start()
+    except RuntimeError:
+        run()
+        return
+    # A moment past the limit, for what the work started just before it (as stopping a call
+    # whose policy check it waited for) to end.
+    done.wait(None if timeout is None else timeout + _OFF_THREAD_GRACE_S)
+
+
+def flush_pending_settles(timeout: Optional[float] = 10.0) -> None:
+    """Finish the calls handed off by finalizers, then wait (up to ``timeout`` seconds in all)
+    for every background settle started so far. The work runs off this thread (see
+    _run_off_this_thread())."""
+    caller = threading.get_ident()
+    _run_off_this_thread(lambda: _flush(timeout, caller), timeout)
+
+
+def _flush(timeout: Optional[float], caller: int) -> None:
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def remaining() -> Optional[float]:
+        return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+    run_handed_off()
+    with _settle_lock:
+        calls = list(_open_calls)
+    for call in calls:
+        # A dropped call is finished here if the worker has not taken it; one being finalized
+        # elsewhere is waited for, as its settle starts when it ends.
+        finish_pending = getattr(call, "finish_pending", None)
+        if finish_pending is not None:
+            try:
+                finish_pending(remaining(), caller=caller)
+            except Exception:
+                pass
+    with _settle_lock:
+        pending = list(_pending_settles)
+    if pending:
+        wait(pending, timeout=remaining())
+
+
+# LLM calls still in flight: an open stream, or a request that has not returned. Each has
+# settle_at_shutdown(timeout, caller) and may have check_pending (True while its policy check
+# runs) and finish_pending(timeout, caller); ``caller`` is the thread that asked, which the
+# work runs off. A call stays here until its finalization has ended. Weak, so
+# a call that is dropped and collected is not kept alive here.
+_open_calls: "weakref.WeakSet[Any]" = weakref.WeakSet()
+_open_calls_hook = False
+
+
+def track_open_call(call: Any) -> None:
+    """Register a call in flight; settle_open_calls() settles it if it is still open then."""
+    global _open_calls_hook
+    with _settle_lock:
+        _open_calls.add(call)
+        if not _open_calls_hook:
+            # start_tracing()'s exit hook also settles open calls before it flushes spans, so
+            # this one settles calls whichever of the two runs first, or without tracing.
+            atexit.register(settle_open_calls)
+            _open_calls_hook = True
+
+
+def untrack_open_call(call: Any) -> None:
+    with _settle_lock:
+        _open_calls.discard(call)
+
+
+def settle_open_calls(timeout: float = 10.0) -> None:
+    """Settle the calls still in flight, then wait for every pending settle, all within
+    ``timeout`` seconds. Each call is stopped where possible and charged what it reported,
+    or its reservation when that is unknown. Run by stop_tracing() and at interpreter exit.
+
+    Calls dropped unfinished whose finalization was handed off are finalized first, as
+    dropped. A call whose policy check is still running is settled once the check returns,
+    so the reservation it makes is settled; those calls go last, as they may wait for their
+    checks (see settle_at_shutdown(timeout)). The work runs off this thread (see
+    _run_off_this_thread()), and is waited for.
+    """
+    caller = threading.get_ident()
+    _run_off_this_thread(lambda: _settle_open_calls(timeout, caller), timeout)
+
+
+def _settle_open_calls(timeout: float, caller: int) -> None:
+    deadline = time.monotonic() + timeout
+    run_handed_off()
+    with _settle_lock:
+        calls = list(_open_calls)
+    calls.sort(key=lambda call: bool(getattr(call, "check_pending", False)))
+    for done, call in enumerate(calls):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "%d open LLM call(s) not settled before the shutdown time limit", len(calls) - done
+            )
+            break
+        try:
+            call.settle_at_shutdown(timeout=remaining, caller=caller)
+        except Exception as exc:
+            logger.debug("settling an open call at shutdown failed: %s", exc)
+    _flush(max(deadline - time.monotonic(), 0.0), caller)
+
+
+def _reset_after_fork() -> None:
+    """In a forked child: the parent's worker threads are gone, its locks may be held, and its
+    calls in flight are the parent's to settle."""
+    global _settle_lock, _settle_executor, _handed_off, _handoff_worker, _handoff_pid
+    _settle_lock = threading.RLock()
+    _settle_executor = None
+    _pending_settles.clear()
+    _open_calls.clear()
+    _handed_off = queue.SimpleQueue()
+    _handoff_worker = _handoff_pid = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 def enforce_tool_call(name: str, arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
