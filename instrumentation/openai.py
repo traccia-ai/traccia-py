@@ -410,7 +410,9 @@ def patch_openai_responses() -> bool:
                 try:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
+                    decision = enforce_llm_call(
+                        kwargs, vendor=attributes.get("llm.vendor"), api=attributes.get("llm.api")
+                    )
                     resp = await create_fn(*args, **kwargs)
                     
                     # Extract response details
