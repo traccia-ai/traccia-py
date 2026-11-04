@@ -79,12 +79,23 @@ def _trace_ids() -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _span_ended(span: Any) -> bool:
+    """Whether the span (a traccia Span, or the OTel span it wraps) has ended. An unsampled
+    span never counts as ended: it has no end time, and keeps its attributes on its wrapper."""
+    if getattr(span, "_ended", False) is True:
+        return True
+    end_time = getattr(getattr(span, "_otel_span", None), "end_time", None)
+    return isinstance(end_time, int) and not isinstance(end_time, bool)
+
+
 def _stamp_span(decision: Dict[str, Any]) -> None:
     try:
         from traccia.context import get_current_span
 
         span = get_current_span()
-        if not span:
+        if not span or _span_ended(span):
+            # Ended: a check that returned after its call was cancelled. OTel drops the
+            # attributes and warns, and get_current_span()'s new wrapper never knows it ended.
             return
         if decision.get("id"):
             span.set_attribute("traccia.policy.decision_id", str(decision["id"]))
