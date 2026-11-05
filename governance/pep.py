@@ -571,20 +571,75 @@ def estimate_prompt_tokens(kwargs: Dict[str, Any]) -> Optional[int]:
     return _estimate_tokens(kwargs)
 
 
+# The OpenAI, Anthropic and Groq SDKs pass NOT_GIVEN / omit for a parameter left out
+# (chat.completions.stream() forwards every one).
+_OMITTED_TYPES = ("NotGiven", "Omit")
+
+
+def _given(value: Any) -> Any:
+    """*value*, or None when it is a provider SDK's omission sentinel."""
+    return None if type(value).__name__ in _OMITTED_TYPES else value
+
+
+def _gemini_body(request: Any) -> Optional[Dict[str, Any]]:
+    """The body of a Gemini request= (a dict or a CreateInteractionRequest) as a dict, or None
+    when it has another form, which could not be rewritten either."""
+    if not isinstance(request, dict) and not hasattr(request, "model_validate"):
+        return None
+    body = _get(request, "body")
+    if hasattr(body, "model_dump"):
+        body = body.model_dump(exclude_none=True)
+    return body if isinstance(body, dict) else None
+
+
+def _with_gemini_body(request: Any, body: Dict[str, Any]) -> Any:
+    """A copy of a Gemini request= with *body*; the caller's request is left as it is."""
+    if isinstance(request, dict):
+        return {**request, "body": body}
+    return type(request).model_validate({**request.model_dump(exclude_none=True), "body": body})
+
+
+def _token_cap(
+    kwargs: Dict[str, Any], vendor: Optional[str], api: Optional[str]
+) -> Tuple[Dict[str, Any], str]:
+    """Where this provider API takes the output-token cap: (params, key)."""
+    if vendor == "google_gemini":
+        config = kwargs.get("generation_config")
+        if hasattr(config, "model_dump"):
+            config = config.model_dump(exclude_none=True)
+        return (config if isinstance(config, dict) else {}), "max_output_tokens"
+    if api == "responses":
+        return kwargs, "max_output_tokens"
+    if vendor == "anthropic":
+        return kwargs, "max_tokens"
+    for key in ("max_completion_tokens", "max_tokens"):
+        if _given(kwargs.get(key)) is not None:
+            return kwargs, key
+    # OpenAI reasoning models reject max_tokens; every Chat model takes max_completion_tokens.
+    return kwargs, "max_completion_tokens" if vendor == "openai" else "max_tokens"
+
+
 def enforce_llm_call(
-    kwargs: Dict[str, Any], vendor: Optional[str] = None
+    kwargs: Dict[str, Any], vendor: Optional[str] = None, api: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Check policy before an LLM call. *vendor* is the span's llm.vendor; Spend Cap
-    uses it to pick that provider's price."""
+    uses it to pick that provider's price. *api* is the span's llm.api ("responses"
+    for the OpenAI Responses API); with *vendor* it picks the token-cap parameter."""
     if not runtime_config.pep_enabled():
         return None
-    model = kwargs.get("model")
-    max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+    params = kwargs
+    # Gemini also takes the whole call as request=, which the SDK rejects mixed with body fields.
+    request = kwargs.get("request") if vendor == "google_gemini" else None
+    if request is not None:
+        params = _gemini_body(request) or {}
+    model = _given(params.get("model"))
+    cap_params, cap_key = _token_cap(params, vendor, api)
+    max_tokens = _given(cap_params.get(cap_key))
     trace_id, _span_id = _trace_ids()
     context: Dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "input_tokens": _estimate_tokens(kwargs),
+        "input_tokens": _estimate_tokens(params),
         "retrieval": _retrieval_context(trace_id),
     }
     if vendor:
@@ -599,10 +654,37 @@ def enforce_llm_call(
     if (decision.get("effect") == "reshape") and not decision.get("would_have"):
         obligations = decision.get("obligations") or {}
         cheaper = obligations.get("cheaper_model") or obligations.get("fallback_model")
-        if cheaper:
-            kwargs["model"] = cheaper
-        if obligations.get("clamp_max_tokens") is not None:
-            kwargs["max_tokens"] = obligations["clamp_max_tokens"]
+        clamp = obligations.get("clamp_max_tokens")
+        if request is None:
+            if cheaper:
+                kwargs["model"] = cheaper
+            if clamp is not None:
+                if cap_params is kwargs:
+                    kwargs[cap_key] = clamp
+                else:
+                    kwargs["generation_config"] = {**cap_params, cap_key: clamp}
+        elif cheaper or clamp is not None:
+            reshaped = None
+            if "model" in params:  # else unreadable, or an agent interaction (no generation_config)
+                body = {**params}
+                if cheaper:
+                    body["model"] = cheaper
+                if clamp is not None:
+                    body["generation_config"] = {**cap_params, cap_key: clamp}
+                try:
+                    reshaped = _with_gemini_body(request, body)
+                except Exception:  # the SDK's model rejected the rewritten body
+                    reshaped = None
+            if reshaped is None:
+                settle_policy(decision, release=True)
+                raise _enrich_blocked(
+                    AgentBlockedError(
+                        "Policy reshape (model or max_output_tokens) cannot be applied to this "
+                        "Gemini request=; blocking the call"
+                    ),
+                    decision,
+                )
+            kwargs["request"] = reshaped
     return decision
 
 

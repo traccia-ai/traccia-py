@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A Groq call settles with the API key, endpoint, and agent of its policy check, so a settle that runs after `stop_tracing()` (a stream read later, or a settle still in the background) is not skipped
 - Calls made through `with_raw_response` are traced, also with `stream=True`: the stream returned by `.parse()` records the completion and token usage. A call made through `with_streaming_response`, whose body you read yourself, ends its span when the call returns and is charged its reservation
 
+### Fixed
+- A policy `clamp_max_tokens` now sets the token cap the provider API takes: `max_output_tokens` for OpenAI Responses and in Gemini's `generation_config`, `max_completion_tokens` or `max_tokens` (whichever the request used) for OpenAI Chat, `max_tokens` for Anthropic. It used to always add `max_tokens`, which Responses and Gemini reject and which left an existing cap untouched. The policy check also sees that cap. Chat requests without a cap get `max_completion_tokens`, since OpenAI reasoning models reject `max_tokens`. A parameter passed as OpenAI's `NOT_GIVEN` or `omit` (as `chat.completions.stream()` does) counts as not set. A Gemini call made with `request=` is checked with that request's model and cap, and a reshape is applied to a copy of the request; if the request cannot be reshaped (an agent interaction, or an unknown request type), the call is blocked
+
 ## [0.1.34] - 2026-11-03
 
 ### Changed

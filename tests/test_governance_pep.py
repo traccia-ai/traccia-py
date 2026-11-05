@@ -1,3 +1,6 @@
+import copy
+import json
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -55,6 +58,155 @@ def test_before_llm_reshape_swaps_model():
                 out = enforce_llm_call(kwargs)
                 assert out["effect"] == "reshape"
                 assert kwargs["model"] == "gpt-4o-mini"
+
+
+@pytest.mark.parametrize(
+    "cap, vendor, api, sent_cap, clamped",
+    [
+        ({"max_output_tokens": 100}, "openai", "responses", 100, {"max_output_tokens": 5}),
+        ({"max_completion_tokens": 100}, "openai", None, 100, {"max_completion_tokens": 5}),
+        ({"max_tokens": 100}, "openai", None, 100, {"max_tokens": 5}),
+        ({}, "openai", None, None, {"max_completion_tokens": 5}),
+        ({"max_tokens": 100}, "anthropic", None, 100, {"max_tokens": 5}),
+        (
+            {"generation_config": {"max_output_tokens": 100, "temperature": 0.2}},
+            "google_gemini",
+            None,
+            100,
+            {"generation_config": {"max_output_tokens": 5, "temperature": 0.2}},
+        ),
+    ],
+)
+def test_before_llm_reshape_clamps_the_api_token_cap(cap, vendor, api, sent_cap, clamped):
+    kwargs = {"model": "m", **cap}
+    session = _reshape(kwargs, {"clamp_max_tokens": 5}, vendor=vendor, api=api)
+    assert session.post.call_args.kwargs["json"]["context"]["max_tokens"] == sent_cap
+    assert kwargs == {"model": "m", **clamped}
+
+
+def _reshape(kwargs, obligations, **enforce_kwargs):
+    decision = {"id": "dec-c", "effect": "reshape", "would_have": False, "obligations": obligations}
+    with runtime_config.run_identity(agent_id="support", pep_enabled=True):
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.return_value = MagicMock(status_code=200, json=lambda: decision)
+                enforce_llm_call(kwargs, **enforce_kwargs)
+    return session
+
+
+try:
+    from openai import NOT_GIVEN, omit
+except ImportError:  # stand-ins for the SDK's omission sentinels: falsy instances of these classes
+
+    class NotGiven:
+        def __bool__(self):
+            return False
+
+    class Omit(NotGiven):
+        pass
+
+    NOT_GIVEN, omit = NotGiven(), Omit()
+
+
+@pytest.mark.parametrize("sentinel", [NOT_GIVEN, omit])
+def test_reshape_ignores_openai_omission_sentinels(sentinel):
+    # chat.completions.stream() forwards every parameter it was not given as a sentinel.
+    kwargs = {"model": "gpt-4o", "max_completion_tokens": sentinel, "max_tokens": 100, "stream": True}
+    session = _reshape(kwargs, {"clamp_max_tokens": 5}, vendor="openai")
+    payload = session.post.call_args.kwargs["json"]
+    json.dumps(payload)
+    assert payload["context"]["max_tokens"] == 100
+    assert kwargs["max_tokens"] == 5
+    assert kwargs["max_completion_tokens"] is sentinel
+
+
+@pytest.mark.parametrize("vendor, api, key", [("openai", "responses", "max_output_tokens"), ("anthropic", None, "max_tokens")])
+def test_policy_check_never_sees_an_omission_sentinel(vendor, api, key):
+    kwargs = {"model": "m", key: NOT_GIVEN}
+    session = _reshape(kwargs, {}, vendor=vendor, api=api)
+    payload = session.post.call_args.kwargs["json"]
+    json.dumps(payload)
+    assert payload["context"]["max_tokens"] is None
+
+
+try:
+    from google.genai._gaos.models.createinteraction import CreateInteractionRequest
+except ImportError:  # stand-in with the SDK's shape: body.generation_config.max_output_tokens
+    from pydantic import BaseModel
+
+    class _GenerationConfig(BaseModel):
+        max_output_tokens: Optional[int] = None
+        temperature: Optional[float] = None
+
+    class _Body(BaseModel):
+        model: str
+        input: Any = None
+        generation_config: Optional[_GenerationConfig] = None
+
+    class CreateInteractionRequest(BaseModel):
+        body: _Body
+
+
+def _gemini_request(form):
+    body = {"model": "gemini-2.5-flash", "input": "hello there", "generation_config": {"max_output_tokens": 100, "temperature": 0.2}}
+    return {"body": body} if form == "dict" else CreateInteractionRequest(body=body)
+
+
+def _gemini_body(request):
+    body = request["body"] if isinstance(request, dict) else request.body
+    return body if isinstance(body, dict) else body.model_dump(exclude_none=True)
+
+
+@pytest.mark.parametrize("form", ["dict", "model"])
+def test_reshape_rewrites_a_gemini_request_copy(form):
+    request = _gemini_request(form)
+    original = copy.deepcopy(request)
+    kwargs = {"request": request}
+    session = _reshape(kwargs, {"clamp_max_tokens": 5, "cheaper_model": "gemini-2.5-flash-lite"}, vendor="google_gemini")
+    context = session.post.call_args.kwargs["json"]["context"]
+    assert context["model"] == "gemini-2.5-flash"
+    assert context["max_tokens"] == 100
+    assert context["input_tokens"]
+    assert set(kwargs) == {"request"}  # the SDK rejects request= mixed with body fields
+    assert type(kwargs["request"]) is type(request)
+    assert _gemini_body(kwargs["request"]) == {
+        "model": "gemini-2.5-flash-lite",
+        "input": "hello there",
+        "generation_config": {"max_output_tokens": 5, "temperature": 0.2},
+    }
+    assert request == original
+
+
+class _UnrebuildableRequest:
+    """A request whose model rejects the rewritten body."""
+
+    body = {"model": "gemini-2.5-flash", "input": "hi", "generation_config": {"max_output_tokens": 100}}
+
+    def model_dump(self, **_kwargs):
+        return {"body": dict(self.body)}
+
+    @classmethod
+    def model_validate(cls, _data):
+        raise ValueError("invalid request")
+
+
+@pytest.mark.parametrize(
+    "request_", [object(), {"body": {"agent": "deep-research", "input": "hi"}}, _UnrebuildableRequest()]
+)
+def test_reshape_blocks_a_gemini_request_it_cannot_clamp(request_):
+    kwargs = {"request": request_}
+    decision = {"id": "dec-c", "effect": "reshape", "would_have": False, "obligations": {"clamp_max_tokens": 5, "reserved_usd": 0.01}}
+    with runtime_config.run_identity(agent_id="support", pep_enabled=True):
+        with patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")):
+            with patch("traccia.governance.pep._http_session") as session:
+                session.post.return_value = MagicMock(status_code=200, json=lambda: decision)
+                with pytest.raises(AgentBlockedError) as exc:
+                    enforce_llm_call(kwargs, vendor="google_gemini")
+    assert "max_output_tokens" in str(exc.value)
+    assert exc.value.decision_id == "dec-c"
+    assert kwargs == {"request": request_}
+    settle = session.post.call_args
+    assert settle.args[0].endswith("/api/v1/policy/settle") and settle.kwargs["json"]["release"] is True
 
 
 def test_before_llm_warn_proceeds():
