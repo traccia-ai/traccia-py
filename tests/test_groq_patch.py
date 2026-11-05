@@ -776,7 +776,8 @@ def test_exit_hook_settles_open_calls_before_flushing_spans(monkeypatch):
     monkeypatch.setattr(auto, "_flush_and_shutdown_metrics", lambda timeout: None)
     monkeypatch.setattr(pep, "settle_open_calls", lambda timeout=10.0: order.append("settle"))
     processor = MagicMock()
-    processor.force_flush.side_effect = lambda *a, **k: order.append("flush")
+    # shutdown() exports what is still queued.
+    processor.shutdown.side_effect = lambda *a, **k: order.append("flush")
     auto._register_shutdown(MagicMock(), processor)
     [cleanup] = hooks
     cleanup()

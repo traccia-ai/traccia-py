@@ -320,20 +320,30 @@ class Span:
             except Exception:
                 pass
         
-        # 1. Run enrichment processors (span is still mutable)
-        self.tracer._run_enrichment_processors(self)
-        
-        # 2. End the OTel span (makes it immutable)
+        self._end_interrupted = False
         try:
-            self._otel_span.end(end_time=self.end_time_ns)
-        except Exception:
-            pass
+            # 1. Run enrichment processors (span is still mutable)
+            self.tracer._run_enrichment_processors(self)
+
+            # 2. End the OTel span (makes it immutable)
+            try:
+                self._otel_span.end(end_time=self.end_time_ns)
+            except Exception:
+                pass
+        except BaseException:
+            # e.g. KeyboardInterrupt: the span is not ended, and processors
+            # waiting for it to end (batching at shutdown) stop waiting.
+            self._end_interrupted = True
+            raise
         
         # 3. OTel export processors run automatically on ReadableSpan
         
         self._ended = True
 
-        # 4. The run is over once its local root span ends; drop its policy evidence.
+        # 4. Processors that need the ended span (e.g. batching for export)
+        self.tracer._run_ended_processors(self)
+
+        # 5. The run is over once its local root span ends; drop its policy evidence.
         # Ask the OTel span: wrappers from get_current_span() carry no parent_span_id.
         if getattr(self._otel_span, "parent", False) is None:
             try:

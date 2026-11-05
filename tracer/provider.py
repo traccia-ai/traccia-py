@@ -11,6 +11,8 @@ from opentelemetry.sdk.resources import Resource as OTelResource
 from opentelemetry.sdk.trace.sampling import Sampler as OTelSampler
 from opentelemetry.sdk.trace.sampling import SamplingResult as OTelSamplingResult
 
+from traccia.utils.fork import reinit_after_fork
+
 
 class SpanProcessor:
     """
@@ -29,6 +31,15 @@ class SpanProcessor:
         
         Args:
             span: Traccia Span instance (mutable)
+        """
+        pass
+
+    def on_ended(self, span) -> None:
+        """
+        Called after on_end(), once the span is ended and immutable.
+
+        Args:
+            span: Traccia Span instance (ended)
         """
         pass
 
@@ -99,6 +110,11 @@ class TracerProvider:
         self._default_otel_sampler: OTelSampler = self._otel_provider.sampler
         self._sampler_switch = _SwitchableSampler(self._default_otel_sampler)
         self._otel_provider.sampler = self._sampler_switch
+        reinit_after_fork(self._at_fork_reinit)
+
+    def _at_fork_reinit(self) -> None:
+        """In a child after os.fork(): get_tracer()'s lock may be held by a thread that is gone."""
+        self._lock = threading.Lock()
 
     def get_tracer(self, name: str) -> "Tracer":
         """

@@ -540,7 +540,8 @@ def start_tracing(
 
     # Use OTLP exporter by default for network export
     if exporter:
-        network_exporter = exporter
+        # The caller owns this exporter; stop_tracing() leaves it open.
+        network_exporter = _CallerOwnedExporter(exporter)
     elif use_otlp:
         # Use OTLP exporter (OpenTelemetry standard)
         network_exporter = OTLPExporter(
@@ -679,11 +680,21 @@ def start_tracing(
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
     # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor
+    caller_owned_otlp = isinstance(network_exporter, _CallerOwnedExporter) and isinstance(
+        network_exporter.exporter, OTLPExporter
+    )
+    if caller_owned_otlp:
+        # OTel's BatchSpanProcessor exports a caller's OTLPExporter directly, as before.
+        network_exporter = network_exporter.exporter
     if use_otlp and isinstance(network_exporter, OTLPExporter) and hasattr(network_exporter, '_otel_exporter'):
         # Use OTel's BatchSpanProcessor for OTLP export
         from opentelemetry.sdk.trace.export import BatchSpanProcessor as OTelBatchSpanProcessor
+        otel_exporter = network_exporter._otel_exporter
+        if caller_owned_otlp:
+            # OTel's processor shuts its exporter down; the caller's stays open.
+            otel_exporter = _CallerOwnedSpanExporter(otel_exporter)
         otel_processor = OTelBatchSpanProcessor(
-            network_exporter._otel_exporter,
+            otel_exporter,
             max_queue_size=max_queue_size,
             max_export_batch_size=max_export_batch_size,
             schedule_delay_millis=schedule_delay_millis,
@@ -843,9 +854,11 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     _stop_pricing_refresh()
     provider = _get_provider()
     if _active_processor:
-        try:
-            _active_processor.force_flush(timeout=flush_timeout)
-        finally:
+        # shutdown() exports what is still queued, bounded by flush_timeout when
+        # given (0 or None: the processor's own shutdown timeout).
+        if flush_timeout:
+            _active_processor.shutdown(timeout=flush_timeout)
+        else:
             _active_processor.shutdown()
     provider.shutdown()
     _flush_and_shutdown_metrics(flush_timeout)
@@ -861,23 +874,27 @@ def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanPr
         return
 
     def _cleanup():
-        # If stop_tracing() was already called (e.g. from app finally block), skip to avoid double shutdown
-        if not _started:
-            return
         # As stop_tracing() does: LLM calls still in flight end their spans before the flush.
-        try:
-            from traccia.governance.pep import settle_open_calls
+        # Skipped when stop_tracing() already ran (e.g. from an app finally block).
+        if _started:
+            try:
+                from traccia.governance.pep import settle_open_calls
 
-            settle_open_calls()
-        except Exception:
-            pass
+                settle_open_calls()
+            except Exception:
+                pass
         try:
-            if processor:
-                processor.force_flush()
-                processor.shutdown()
+            # shutdown() exports what is still queued, bounded by its own timeout. It is
+            # idempotent: after stop_tracing() it returns at once, and if shutdown is
+            # still under way (an exporter called stop_tracing() from inside an export)
+            # it waits for the final flush, so the process does not exit in the middle.
+            for proc in {id(p): p for p in (processor, _active_processor) if p}.values():
+                proc.shutdown()
         finally:
-            provider.shutdown()
-            _flush_and_shutdown_metrics(5.0)
+            # If stop_tracing() was already called (e.g. from app finally block), skip the rest
+            if _started:
+                provider.shutdown()
+                _flush_and_shutdown_metrics(5.0)
 
     atexit.register(_cleanup)
     _registered_shutdown = True
@@ -974,9 +991,40 @@ def _combine_exporters(primary, secondary):
         def shutdown(self):
             for exp in (primary, secondary):
                 if hasattr(exp, "shutdown"):
-                    exp.shutdown()
+                    try:
+                        exp.shutdown()
+                    except Exception:
+                        import logging
+                        logging.getLogger(__name__).exception("Exporter shutdown failed")
 
     return _Multi()
+
+
+class _CallerOwnedExporter:
+    """An exporter passed to start_tracing(); the caller decides when to shut it down."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+
+class _CallerOwnedSpanExporter:
+    """The OTel exporter inside a caller's OTLPExporter, as OTel's BatchSpanProcessor sees it."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self.exporter.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        # The caller decides when to shut it down.
+        pass
 
 
 _pricing_refresh_stop: Optional[threading.Event] = None
