@@ -254,8 +254,9 @@ class _CallState:
         self._t0 = time.perf_counter()
         # The process making the call: a forked child leaves the call to its parent.
         self._pid = os.getpid()
-        # The thread making the call, which runs its policy check.
-        self._thread = threading.get_ident()
+        # The thread running its policy check: the calling thread, or for an async call a
+        # worker thread (None until the check starts there).
+        self._thread: Optional[int] = threading.get_ident()
         # Set when the policy check has returned or failed.
         self._checked = threading.Event()
         # API key, endpoint and agent of the policy check; its settle goes to them.
@@ -400,6 +401,7 @@ class _CallState:
         from traccia.governance.pep import enforce_llm_call, settle_target
 
         decision = None
+        self._thread = threading.get_ident()
         try:
             self._target = settle_target()
             decision = enforce_llm_call(kwargs, vendor=VENDOR)
@@ -407,6 +409,24 @@ class _CallState:
             self.decision = decision
             if self._settle_turns.pop():
                 self._in_call_context(self._settle)
+            self._checked.set()
+
+    async def check_off_loop(self, kwargs: Dict[str, Any]) -> None:
+        """check() on a worker thread, so a slow policy server never blocks the event loop (see
+        pep.run_off_loop()). A call cancelled during its check is finalized by its caller, and
+        the check, taking the second settle turn, settles what it reserves when it returns."""
+        from traccia import runtime_config
+        from traccia.governance.pep import run_off_loop
+
+        if not runtime_config.pep_enabled():
+            self.check(kwargs)  # no check, so no I/O: stay on the loop
+            return
+        self._thread = None  # the worker thread, once it starts the check
+        await run_off_loop(self.check, kwargs, if_cancelled=self._check_cancelled)
+
+    def _check_cancelled(self, done: Any) -> None:
+        if done is None:
+            # Cancelled before the check started: no decision, and nothing to wait for.
             self._checked.set()
 
     @property
@@ -892,7 +912,7 @@ def _build_async_wrapper(original_create: Callable[..., Any]) -> Callable[..., A
         span, state, token = _start(kwargs)
         try:
             try:
-                state.check(kwargs)
+                await state.check_off_loop(kwargs)
                 _after_check(span, state, kwargs)
                 resp = await original_create(self, *args, **kwargs)
             except BaseException as exc:

@@ -407,10 +407,15 @@ def patch_openai_responses() -> bool:
             t0 = time.perf_counter()
             with tracer.start_as_current_span("llm.openai.responses", attributes=attributes) as span:
                 decision = None
+                target = None
                 try:
-                    from traccia.governance.pep import enforce_llm_call, finish_llm_call
+                    from traccia.governance.pep import (
+                        enforce_llm_call_off_loop,
+                        finish_llm_call_in_background,
+                    )
 
-                    decision = enforce_llm_call(
+                    # Off the event loop, so a slow policy server delays no other task.
+                    decision, target = await enforce_llm_call_off_loop(
                         kwargs, vendor=attributes.get("llm.vendor"), api=attributes.get("llm.api")
                     )
                     resp = await create_fn(*args, **kwargs)
@@ -467,16 +472,18 @@ def patch_openai_responses() -> bool:
                         duration=duration_val,
                         cost=cost_val
                     )
-                    finish_llm_call(decision, actual_usd=cost_val)
+                    finish_llm_call_in_background(decision, target=target, actual_usd=cost_val)
                     return resp
-                except Exception as exc:
+                except BaseException as exc:
+                    # BaseException too: a cancelled call (asyncio.CancelledError, a wait_for()
+                    # timeout) releases its reservation instead of holding it until it expires.
                     try:
-                        from traccia.governance.pep import finish_llm_call as _finish
-                        _finish(decision, release=True)
+                        from traccia.governance.pep import finish_llm_call_in_background as _finish
+                        _finish(decision, target=target, release=True)
                     except Exception:
                         pass
                     span.record_exception(exc)
-                    span.set_status(SpanStatus.ERROR, str(exc))
+                    span.set_status(SpanStatus.ERROR, str(exc) or type(exc).__name__)
                     try:
                         from traccia.metrics.recorder import get_metrics_recorder
                         rec = get_metrics_recorder()
