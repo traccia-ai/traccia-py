@@ -21,9 +21,54 @@ An open-source Python SDK built on OpenTelemetry, with a hosted app for policies
 - **Govern.** Check each LLM and tool call before it runs: stop an agent that overspends, loops or calls the wrong tool.
 - **Prove.** Keep evidence for the EU AI Act and HIPAA in the Compliance Hub.
 
+<p align="center">
+  <img src="https://traccia.ai/docs/Trace_detail.png" alt="One agent run in Traccia: duration, cost, tokens, LLM and tool calls, and the span timeline" width="900">
+  <br>
+  <em>One agent run in Traccia: cost, tokens, every LLM and tool call, and how long each took.</em>
+</p>
+
 <!-- TODO: 20 to 30 second GIF here. An agent loops on a tool, Loop Cap blocks the next call, and the trace in Traccia shows which policy fired and why. -->
 
-## How a policy check works
+## Quickstart
+
+No account needed for this part.
+
+**1. Install**
+
+```bash
+pip install traccia
+```
+
+**2. Trace your first call**
+
+```python
+from openai import OpenAI
+from traccia import init, observe
+
+init(enable_console_exporter=True)  # print spans in your terminal
+# init(endpoint="http://localhost:4318/v1/traces")  # or send them to Jaeger, Tempo, SigNoz...
+# init()  # or to Traccia: set TRACCIA_API_KEY from app.traccia.ai
+
+client = OpenAI()  # patched by init()
+
+@observe()
+def answer(question: str) -> str:
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": question}],
+    )
+    return resp.choices[0].message.content
+
+answer("What is OpenTelemetry?")
+```
+
+**3. See the trace**
+
+Each span records the model, tokens, cost, prompt, completion and latency. It prints in your terminal, shows up in your OTLP backend ([Jaeger](https://traccia.ai/docs/guides/local-jaeger/), [Grafana](https://traccia.ai/docs/guides/local-grafana/)), or appears under **Traces** in Traccia like the run above.
+
+## Stop a runaway agent
+
+`@observe` records what happened. `@govern` also decides whether the next call is allowed to happen. Policies live in the Traccia app, so you can change a limit without a deploy.
 
 ```mermaid
 flowchart LR
@@ -36,14 +81,6 @@ flowchart LR
     D --> G
     G --> H["Traccia"]
     G --> I["Or any OTLP backend:<br/>Tempo, Jaeger, Zipkin, SigNoz"]
-```
-
-`@observe` records what happened. `@govern` also decides whether the next call is allowed to happen. Policies are set in the Traccia app, so you can change a limit without a deploy.
-
-## Stop a runaway agent
-
-```bash
-pip install traccia
 ```
 
 In the [Traccia app](https://app.traccia.ai/), create a **Loop Cap** policy with a maximum of 3 tool calls per run, set it to **Block**, and copy your API key.
@@ -81,61 +118,32 @@ The same wrapper enforces the other runtime policies. Among them:
 
 Also real time, SDK only: Freshness Guard, Retrieval Completeness, Unique Customer Cap and Prompt Pin. All policies: [traccia.ai/docs/platform/policies](https://traccia.ai/docs/platform/policies/).
 
-**Roll out without breaking anything.** Each policy runs in one of three modes: Observe logs a match, Warn alerts, and Block stops the call. Start in Observe, look at what it would have stopped, then switch to Block. The Decision Log in the app shows the decision for every call.
+Each policy runs in one of three modes: Observe logs a match, Warn alerts, and Block stops the call. You can start in Observe, see what it would have stopped, then switch to Block. The Decision Log in the app shows the decision for every call.
 
-If Traccia can't be reached, the check blocks the call by default. You can choose to let calls through instead under **Settings → Policy Enforcement**, or locally with `init(policy_fail_mode="open")`. See [Governance in the SDK](https://traccia.ai/docs/sdk/governance/).
+If Traccia can't be reached, the check blocks the call by default. You can let calls through instead under **Settings → Policy Enforcement**, or locally with `init(policy_fail_mode="open")`. See [Governance in the SDK](https://traccia.ai/docs/sdk/governance/).
 
-## Just want tracing?
-
-No account needed. `@observe` works with any OTLP backend.
-
-```python
-from openai import OpenAI
-from traccia import init, observe
-
-init(endpoint="http://localhost:4318/v1/traces")  # your own Tempo, Jaeger, SigNoz...
-client = OpenAI()  # patched by init()
-
-@observe()
-def answer(question: str) -> str:
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": question}],
-    )
-    return resp.choices[0].message.content
-
-answer("What is OpenTelemetry?")  # span records model, tokens, cost, prompt, completion, latency
-```
-
-Guides: [local Jaeger](https://traccia.ai/docs/guides/local-jaeger/) · [local Grafana](https://traccia.ai/docs/guides/local-grafana/) · [exporters](https://traccia.ai/docs/sdk/exporters/)
-
-## What's open source, and what needs an account
+## What needs an account
 
 | | Without an account | With a Traccia account |
 |---|---|---|
-| Tracing, tokens and cost on each span | Yes, to any OTLP backend | Yes |
+| Tracing, tokens and cost on each span | Yes, to the console or any OTLP backend | Yes |
 | Auto-instrumentation and framework integrations | Yes | Yes |
-| Runtime policies (`@govern`) | No | Yes. The Free plan includes 1 active policy |
+| Runtime policies (`@govern`) | No | Yes |
 | Prompt registry (`load_prompt`) and saved experiments | No | Yes |
-| Human approval for refunds and purchases | No | Team plan and up |
-| Compliance Hub (EU AI Act, HIPAA evidence) | No | Enterprise plan |
+| Human approval, the Gateway, the Compliance Hub | No | On paid plans |
 
-The Free plan includes 50K events a month. Plans and limits: [traccia.ai/pricing](https://traccia.ai/pricing/).
+There is a free plan. See [pricing](https://traccia.ai/pricing/).
 
 ## Works with
 
 - **Model SDKs, patched automatically:** OpenAI, Anthropic, Gemini (`google-genai`), Groq
 - **Agent frameworks:** [LangChain](https://traccia.ai/docs/integrations/langchain/), [CrewAI](https://traccia.ai/docs/integrations/crewai/), [OpenAI Agents SDK](https://traccia.ai/docs/integrations/openai-agents/)
 - **Coding agents, traced without the SDK:** [Claude Code](https://traccia.ai/docs/integrations/claude-code/), [Cursor](https://traccia.ai/docs/integrations/cursor/), [GitHub Copilot](https://traccia.ai/docs/integrations/github-copilot/)
-- **No SDK at all:** point an OpenAI, Anthropic or Gemini client at the [Traccia Gateway](https://traccia.ai/docs/platform/gateway/) and Spend Cap and Model Boundary still apply (Business plan)
+- **No SDK at all:** point an OpenAI, Anthropic or Gemini client at the [Traccia Gateway](https://traccia.ai/docs/platform/gateway/), and Spend Cap and Model Boundary still apply
 
 ## Fail a pull request on a bad eval
 
 `traccia eval` fails the CI job when quality, cost or latency misses the bar you set. See [CI evals](https://traccia.ai/docs/guides/ci-evals/) and the [GitHub Action](https://github.com/traccia-ai/traccia-eval-action).
-
-## Coming from another tool?
-
-Side-by-side comparisons: [Langfuse](https://traccia.ai/blog/langfuse-alternative/) · [Arize Phoenix](https://traccia.ai/blog/arize-alternative/) · [LangSmith](https://traccia.ai/blog/langsmith-alternative/) · [Braintrust](https://traccia.ai/blog/braintrust-alternative/) · [Datadog](https://traccia.ai/blog/datadog-alternative/)
 
 ## Docs
 
@@ -154,6 +162,7 @@ Side-by-side comparisons: [Langfuse](https://traccia.ai/blog/langfuse-alternativ
 | `traccia doctor`, `check`, `pricing`, `eval` | [CLI](https://traccia.ai/docs/reference/cli/) |
 | Full API | [Python SDK reference](https://traccia.ai/docs/reference/python-sdk/) |
 | Something not working | [Troubleshooting](https://traccia.ai/docs/guides/troubleshooting/) |
+| Docs for your coding agent | [traccia.ai/llms.txt](https://traccia.ai/llms.txt) |
 
 ## Contributing
 
@@ -168,6 +177,12 @@ pytest tests/ -v
 ```
 
 If Traccia caught a bad call for you, a star helps other people find it.
+
+> ### Read this far? Come build Traccia with us.
+>
+> If you want to work on Traccia full time, skip the cover letter. Email **[founder@traccia.ai](mailto:founder@traccia.ai)** with one specific thing: a trace the SDK got wrong, a policy you needed and couldn't build, or a part of this code you would rewrite and how.
+>
+> "I'm passionate about AI" gets archived. A link to your pull request gets a reply.
 
 ## License
 
