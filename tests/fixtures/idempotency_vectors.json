@@ -1,0 +1,304 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "basic_sorted",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"b": 1, "a": "x"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":\"x\",\"b\":1},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "none_top_dropped",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": 1, "cc": null},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":1},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "nested_null_kept",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": {"b": null}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":{\"b\":null}},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "integral_float",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"n": 2.0},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"n\":2},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "huge_integral_float",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"n": 1e21},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"n\":1000000000000000000000},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "bigint_lossless",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"n": {"$bigint": "9007199254740993"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"n\":9007199254740993},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "plain_floats",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"x": 0.1, "y": 1234.5678},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"x\":0.1,\"y\":1234.5678},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "integral_float_2p55_plus",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"n": 1.2345678901234568e20},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"n\":123456789012345683968},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "tiny_float",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"x": 0.00001, "y": 1.5e-7, "z": -2e-10},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"x\":0.00001,\"y\":0.00000015,\"z\":-0.0000000002},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "nan",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"x": {"$float": "nan"}},
+      "unkeyable": true
+    },
+    {
+      "name": "nfc",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"s": "e\u0301"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"s\":\"\u00e9\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "nfc_key",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"e\u0301": 1},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"\u00e9\":1},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "nfc_key_collision",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"\u00e9": 1, "e\u0301": 2},
+      "unkeyable": true
+    },
+    {
+      "name": "control_chars",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"s": "a\nb\u0001"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"s\":\"a\\nb\\u0001\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "utf8_key_order",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"\u00e9": 1, "z": 2, "Z": 3, "\ud83d\ude00": 4, "\ufb00": 5},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"Z\":3,\"z\":2,\"\u00e9\":1,\"\ufb00\":5,\"\ud83d\ude00\":4},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "list_mixed",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"items": [1, "a", null, [true]]},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"items\":[1,\"a\",null,[true]]},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a@x", "template_id": "w", "request_id": "r1"},
+      "key_fields": ["to", "template_id"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"template_id\":\"w\",\"to\":\"a@x\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields_missing_required_is_left_out",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a"},
+      "key_fields": ["to", "cc"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"to\":\"a\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields_optional_missing",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a"},
+      "key_fields": ["to", "cc?"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"to\":\"a\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields_present_null_is_dropped",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a", "cc": null},
+      "key_fields": ["to", "cc"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"to\":\"a\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields_all_optional_and_empty_keys_the_empty_selection",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a", "cc": null},
+      "key_fields": ["cc?", "bcc?"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_fields_none_matched_keys_the_empty_selection",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"to": "a", "cc": null, "n": 2},
+      "key_fields": ["cc", "bcc"],
+      "canonical": "{\"agent\":\"a1\",\"args\":{},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "datetime_tz",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"at": {"$datetime": "2026-01-02T03:04:05.678+05:30"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"at\":\"2026-01-01T21:34:05.678Z\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "empty_agent",
+      "agent": null,
+      "tool": "t",
+      "args": {"a": 1},
+      "canonical": "{\"agent\":\"\",\"args\":{\"a\":1},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "depth_32_ok",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"x": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "depth_33_unkeyable",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"x": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]},
+      "unkeyable": true
+    },
+    {
+      "name": "decimal",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"amt": {"$decimal": "10.50"}, "b": {"$decimal": "1E+2"}, "neg": {"$decimal": "-0.00"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"amt\":10.5,\"b\":100,\"neg\":0},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "decimal_long",
+      "python_only": true,
+      "agent": "a1",
+      "tool": "t",
+      "args": {"amt": {"$decimal": "1.23456789012345678901234567890100"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"amt\":1.234567890123456789012345678901},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "key_extra",
+      "agent": "a1",
+      "tool": "send_reminder",
+      "args": {"template": "welcome"},
+      "extra": {"tenant": "t_42"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"template\":\"welcome\"},\"extra\":{\"tenant\":\"t_42\"},\"tool\":\"send_reminder\",\"v\":1}"
+    },
+    {
+      "name": "key_extra_with_key_fields",
+      "agent": "a1",
+      "tool": "refund",
+      "args": {"order_id": "o1", "note": "x"},
+      "key_fields": ["order_id"],
+      "extra": {"account": "acct_1"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"order_id\":\"o1\"},\"extra\":{\"account\":\"acct_1\"},\"tool\":\"refund\",\"v\":1}"
+    },
+    {
+      "name": "key_extra_unkeyable",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": 1},
+      "extra": {"x": {"$float": "nan"}},
+      "unkeyable": true
+    },
+    {
+      "name": "key_types_coerce",
+      "agent": "a1",
+      "tool": "issue_refund",
+      "args": {"order_id": 123, "amount": "007.50", "refund_all": " TRUE ", "note": 5},
+      "key_types": {"order_id": "string", "amount": "number", "refund_all": "boolean"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"amount\":7.5,\"note\":5,\"order_id\":\"123\",\"refund_all\":true},\"tool\":\"issue_refund\",\"v\":1}"
+    },
+    {
+      "name": "key_types_already_typed",
+      "agent": "a1",
+      "tool": "issue_refund",
+      "args": {"order_id": "123", "amount": 7.5, "refund_all": true, "note": 5},
+      "key_types": {"order_id": "string", "amount": "number", "refund_all": "boolean"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"amount\":7.5,\"note\":5,\"order_id\":\"123\",\"refund_all\":true},\"tool\":\"issue_refund\",\"v\":1}"
+    },
+    {
+      "name": "key_types_number_edges",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": "-0.00", "b": "12345678901234567890", "c": "1e3", "d": "ten", "e": 10.0, "f": "-00.10"},
+      "key_types": {"a": "number", "b": "number", "c": "number", "d": "number", "e": "string", "f": "number"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":0,\"b\":12345678901234567890,\"c\":\"1e3\",\"d\":\"ten\",\"e\":\"10\",\"f\":-0.1},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "uuid",
+      "python_only": true,
+      "agent": "a1",
+      "tool": "t",
+      "args": {"u": {"$uuid": "6F9619FF-8B86-D011-B42D-00C04FC964FF"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"u\":\"6f9619ff-8b86-d011-b42d-00c04fc964ff\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "naive_dt",
+      "python_only": true,
+      "agent": "a1",
+      "tool": "t",
+      "args": {"at": {"$naive_datetime": "2026-01-02T03:04:05"}},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"at\":\"2026-01-02T03:04:05.000\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "set",
+      "python_only": true,
+      "agent": "a1",
+      "tool": "t",
+      "args": {"s": {"$set": [1, 2]}},
+      "unkeyable": true
+    },
+    {
+      "name": "key_types_trim_ascii_whitespace_only",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": "\ufeff7", "b": "\u00857", "c": "\u001c7", "d": " \t7\n", "e": "\ufefftrue", "f": "\u0085false"},
+      "key_types": {"a": "number", "b": "number", "c": "number", "d": "number", "e": "boolean", "f": "boolean"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":\"\ufeff7\",\"b\":\"\u00857\",\"c\":\"\\u001c7\",\"d\":7,\"e\":\"\ufefftrue\",\"f\":\"\u0085false\"},\"tool\":\"t\",\"v\":1}"
+    },
+    {
+      "name": "decimal_beyond_the_bound_unkeyable",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": {"$decimal": "1E+500"}},
+      "unkeyable": true
+    },
+    {
+      "name": "key_types_number_beyond_the_bound_stays_text",
+      "agent": "a1",
+      "tool": "t",
+      "args": {"a": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000", "b": "100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},
+      "key_types": {"a": "number", "b": "number"},
+      "canonical": "{\"agent\":\"a1\",\"args\":{\"a\":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,\"b\":\"100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"},\"tool\":\"t\",\"v\":1}"
+    }
+  ]
+}

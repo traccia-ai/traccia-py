@@ -3,7 +3,8 @@
 from traccia.auto import start_tracing, stop_tracing, init, trace, end_auto_trace, force_flush
 from traccia.tracer import TracerProvider
 from traccia.instrumentation.decorator import observe
-from traccia.governance import govern, AgentBlockedError, ApprovalPending, GovernanceConfigError, pending_tool_result, check_policy
+from traccia.governance import govern, AgentBlockedError, ApprovalPending, GovernanceConfigError, IdempotencyRepeat, pending_tool_result, check_policy
+from traccia.governance.idempotency import DefiniteFailure, Unkeyable, idempotency_key
 from traccia.context import (
     get_current_span,
     run_with_span,
@@ -33,7 +34,7 @@ try:
 except ImportError:
     __version__ = "0.1.0"  # Fallback for Python < 3.8
 
-# Initialize global tracer provider (now uses OpenTelemetry directly)
+# Global tracer provider (OpenTelemetry).
 _global_tracer_provider = TracerProvider()
 
 
@@ -43,24 +44,12 @@ def get_tracer(name: str = "default"):
 
 
 def span(name: str, attributes: dict = None):
-    """
-    Convenience function to create a span using the default tracer.
-    
-    This is a simpler alternative to:
-        tracer = get_tracer("name")
-        with tracer.start_as_current_span("span_name") as span:
-    
-    Usage:
-        from traccia import span
-        
-        with span("my_operation"):
-            # Your code here
-            pass
-        
-        # With attributes
+    """Start a span on the default tracer, as a context manager.
+
+    Usage::
+
         with span("my_operation", {"key": "value"}) as s:
             s.set_attribute("another", "attr")
-            # Your code here
     """
     tracer = get_tracer()
     return tracer.start_as_current_span(name, attributes=attributes)
@@ -108,10 +97,14 @@ __all__ = [
     "observe",
     "govern",
     "AgentBlockedError",
+    "IdempotencyRepeat",
     "GovernanceConfigError",
     "ApprovalPending",
     "pending_tool_result",
     "check_policy",
+    "idempotency_key",
+    "DefiniteFailure",
+    "Unkeyable",
     "metrics",
     "load_prompt",
     "prefetch_prompts",
