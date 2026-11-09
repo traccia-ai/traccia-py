@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextvars
 import logging
@@ -754,6 +755,81 @@ def finish_llm_call_in_background(decision: Optional[Dict[str, Any]], **kwargs: 
     future.add_done_callback(_settle_done)
 
 
+# Blocking work for async LLM calls (the policy check), run off the event loop.
+_offloop_executor: Optional[ThreadPoolExecutor] = None
+_offloop_lock = threading.Lock()
+
+
+def _offloop_pool() -> ThreadPoolExecutor:
+    global _offloop_executor
+    with _offloop_lock:
+        if _offloop_executor is None:
+            _offloop_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="traccia-check")
+        return _offloop_executor
+
+
+async def run_off_loop(
+    fn: Callable[..., Any],
+    *args: Any,
+    if_cancelled: Optional[Callable[[Optional[Future]], None]] = None,
+) -> Any:
+    """Await ``fn(*args)`` run on a worker thread, in a copy of the caller's context (its agent,
+    run and span), so blocking I/O such as a slow policy server never stalls the event loop.
+
+    The thread cannot be stopped. If the awaiting task is cancelled (asyncio.CancelledError, a
+    wait_for() timeout), ``if_cancelled`` runs in that context copy: with fn's finished Future
+    once fn returns, or at once with None if fn never started. It must not raise.
+    """
+    ctx = contextvars.copy_context()
+    future = _offloop_pool().submit(ctx.run, fn, *args)
+    try:
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        if if_cancelled is not None:
+            if future.cancel():
+                ctx.run(if_cancelled, None)
+            else:
+                # Runs once fn has returned and left ctx, on the worker (or here, if it has).
+                future.add_done_callback(lambda done: ctx.run(if_cancelled, done))
+        raise
+
+
+def _check_with_target(
+    kwargs: Dict[str, Any], vendor: Optional[str], api: Optional[str]
+) -> Tuple[Optional[Dict[str, Any]], Optional[SettleTarget]]:
+    target = settle_target()
+    return enforce_llm_call(kwargs, vendor=vendor, api=api), target
+
+
+def _release_late_check(done: Optional[Future]) -> None:
+    """The caller was cancelled during its policy check: release what the check reserved, as
+    the call will never be made. A background settle, so flush_pending_settles() waits for it."""
+    if done is None:
+        return  # the check never started: nothing reserved
+    try:
+        decision, target = done.result()
+    except BaseException:
+        return  # the check failed: nothing reserved
+    try:
+        finish_llm_call_in_background(decision, target=target, release=True)
+    except Exception:
+        pass
+
+
+async def enforce_llm_call_off_loop(
+    kwargs: Dict[str, Any], vendor: Optional[str] = None, api: Optional[str] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[SettleTarget]]:
+    """enforce_llm_call() for an async LLM call, on a worker thread (see run_off_loop()). A
+    reshape still rewrites ``kwargs``. Returns the decision and the settle_target() the check
+    used; settle with finish_llm_call_in_background(decision, target=target, ...).
+
+    A call cancelled during its check releases what the check reserves once it returns.
+    """
+    if not runtime_config.pep_enabled():
+        return None, None  # no check, so no I/O: stay on the loop
+    return await run_off_loop(_check_with_target, kwargs, vendor, api, if_cancelled=_release_late_check)
+
+
 # Work handed off by garbage-collection finalizers (a stream dropped unfinished). The collector
 # runs them on whatever thread it interrupts, possibly inside a lock that finalizing the call
 # takes (an HTTP connection pool's, ThreadPoolExecutor.submit()'s) or while other code is half
@@ -932,8 +1008,11 @@ def _reset_after_fork() -> None:
     """In a forked child: the parent's worker threads are gone, its locks may be held, and its
     calls in flight are the parent's to settle."""
     global _settle_lock, _settle_executor, _handed_off, _handoff_worker, _handoff_pid
+    global _offloop_lock, _offloop_executor
     _settle_lock = threading.RLock()
     _settle_executor = None
+    _offloop_lock = threading.Lock()
+    _offloop_executor = None
     _pending_settles.clear()
     _open_calls.clear()
     _handed_off = queue.SimpleQueue()

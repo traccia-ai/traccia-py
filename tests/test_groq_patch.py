@@ -694,7 +694,7 @@ def test_shutdown_from_inside_the_policy_check_does_not_wait_for_it(client, trac
 
 
 def test_async_shutdown_during_the_policy_check_settles_the_reservation(async_client, tracer, server):
-    # The async wrapper runs the check on the event loop's thread.
+    # The async wrapper runs the check on a worker thread, off the event loop.
     server.hold_check = threading.Event()
     caller, results = governed_call_in_thread(lambda: asyncio.run(create(async_client)))
     assert server.check_entered.wait(timeout=5)
@@ -1637,6 +1637,120 @@ def test_async_stream_settles_for_the_creating_agent(async_client, server):
 
     asyncio.run(run())
     assert [s["agent_id"] for s in server.settles] == ["agent-a"]
+
+
+# -- async: the policy check runs off the event loop ------------------------------
+
+
+def timer_lateness(make_call):
+    """Run a call beside a 10 ms timer; return how late the timer fired, in seconds."""
+
+    async def main():
+        loop = asyncio.get_running_loop()
+        fired = loop.create_future()
+        start = loop.time()
+        loop.call_later(0.01, lambda: fired.set_result(loop.time() - start))
+        task = asyncio.ensure_future(make_call())
+        elapsed = await fired
+        await task
+        return elapsed - 0.01
+
+    return asyncio.run(main())
+
+
+def slow_async_client(started):
+    """An AsyncGroq whose requests stay in flight (for 10 seconds) without blocking the loop."""
+
+    async def handler(request):
+        started.set()
+        await asyncio.sleep(10)
+
+    return AsyncGroq(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), max_retries=0
+    )
+
+
+def wait_for_settles(server, count=1):
+    """Settles started by a policy check that returns after its call was cancelled."""
+    deadline = time.monotonic() + 5
+    while len(server._settles) < count and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return server.settles
+
+
+def test_async_policy_check_does_not_block_the_event_loop(async_client, tracer, server, governed):
+    server.during_check = lambda: time.sleep(0.25)
+    lateness = timer_lateness(lambda: create(async_client))
+    assert lateness < 0.1  # the 250 ms check runs off the loop
+    assert [settle_fields(s) for s in server.settles] == [priced()]
+    assert server.settles[0]["agent_id"] == "agent-a"  # checked in the caller's context
+    assert tracer.spans[0].ended == 1
+
+
+def test_async_policy_reshape_applies_off_the_loop(async_client, api, tracer, server, governed):
+    server.decision = {
+        "effect": "reshape",
+        "would_have": False,
+        "obligations": {"reserved_usd": RESERVED, "cheaper_model": "llama-3.1-8b-instant"},
+    }
+    asyncio.run(create(async_client))
+    assert [r["model"] for r in api.requests] == ["llama-3.1-8b-instant"]
+    assert server.checks[0]["context"]["model"] == MODEL
+
+
+def test_async_call_cancelled_during_its_policy_check_releases_the_reservation(
+    async_client, api, tracer, server, governed
+):
+    server.hold_check = threading.Event()
+
+    async def main():
+        task = asyncio.ensure_future(create(async_client))
+        while not server.check_entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    # Finalized when cancelled; the check, still running, settles what it reserves.
+    assert tracer.spans[0].ended == 1
+    assert tracer.spans[0].status[0] == SpanStatus.ERROR
+    assert server._settles == []
+    server.hold_check.set()
+    assert [settle_fields(s)["release"] for s in wait_for_settles(server)] == [True]
+    assert server.settles[0]["agent_id"] == "agent-a"
+    assert api.requests == []  # Groq is never called
+    assert tracer.spans[0].ended == 1
+
+
+def test_async_cancelled_call_releases_its_reservation(async_client, tracer, server, governed):
+    started = threading.Event()
+    client = slow_async_client(started)
+
+    async def main():
+        task = asyncio.ensure_future(create(client))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    assert [settle_fields(s)["release"] for s in server.settles] == [True]
+    assert isinstance(tracer.spans[0].exceptions[0], asyncio.CancelledError)
+
+
+def test_async_wait_for_timeout_releases_the_reservation(async_client, tracer, server, governed):
+    server.during_check = lambda: time.sleep(0.25)
+    client = slow_async_client(threading.Event())
+
+    async def main():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(create(client), 0.4)
+
+    asyncio.run(main())
+    assert [settle_fields(s)["release"] for s in server.settles] == [True]
+    assert tracer.spans[0].ended == 1
 
 
 # -- regression: no billed Groq call may settle for $0 ----------------------------

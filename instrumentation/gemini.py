@@ -286,23 +286,32 @@ def _build_async_wrapper(original_create):
             "llm.gemini.interaction", attributes=attributes
         ) as span:
             decision = None
+            target = None
             try:
-                from traccia.governance.pep import enforce_llm_call, finish_llm_call
+                from traccia.governance.pep import (
+                    enforce_llm_call_off_loop,
+                    finish_llm_call_in_background,
+                )
 
-                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
+                # Off the event loop, so a slow policy server delays no other task.
+                decision, target = await enforce_llm_call_off_loop(
+                    kwargs, vendor=attributes.get("llm.vendor")
+                )
                 resp = await original_create(self, *args, **kwargs)
-                if not streaming: 
+                if not streaming:
                     _populate_span(span, resp, model, t0)
-                finish_llm_call(decision)
+                finish_llm_call_in_background(decision, target=target)
                 return resp
-            except Exception as exc:
+            except BaseException as exc:
+                # BaseException too: a cancelled call (asyncio.CancelledError, a wait_for()
+                # timeout) releases its reservation instead of holding it until it expires.
                 try:
-                    from traccia.governance.pep import finish_llm_call as _finish
-                    _finish(decision, release=True)
+                    from traccia.governance.pep import finish_llm_call_in_background as _finish
+                    _finish(decision, target=target, release=True)
                 except Exception:
                     pass
                 span.record_exception(exc)
-                span.set_status(SpanStatus.ERROR, str(exc))
+                span.set_status(SpanStatus.ERROR, str(exc) or type(exc).__name__)
                 _record_exception_metric(model)
                 raise
 
