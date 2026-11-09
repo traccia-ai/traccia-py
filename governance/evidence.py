@@ -18,11 +18,22 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
+from traccia.utils.fork import reinit_after_fork
+
 MAX_TRACES = 1024
 TTL_S = 3600.0
 MAX_READS_PER_SCOPE = 64
 
 _lock = threading.Lock()
+
+
+def _reset_lock_after_fork() -> None:
+    # Span.end() takes this lock (forget_trace); a thread gone after fork may hold it.
+    global _lock
+    _lock = threading.Lock()
+
+
+reinit_after_fork(_reset_lock_after_fork)
 _run_scope: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("traccia_evidence_run", default=None)
 
 

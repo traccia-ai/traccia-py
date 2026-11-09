@@ -23,6 +23,7 @@ from traccia.guardrails.detectors import detect_all
 from traccia.guardrails.evaluator import evaluate_run
 from traccia.guardrails.schema import GuardrailFinding
 from traccia.tracer.provider import SpanProcessor
+from traccia.utils.fork import reinit_after_fork
 
 
 @dataclass
@@ -50,6 +51,11 @@ class GuardrailDetectorProcessor(SpanProcessor):
         self._heuristics_enabled = heuristics_enabled
         self._lock = threading.Lock()
         self._traces: Dict[str, _TraceState] = {}
+        reinit_after_fork(self._at_fork_reinit)
+
+    def _at_fork_reinit(self) -> None:
+        """In a child after os.fork(): the lock may be held by a thread that is gone."""
+        self._lock = threading.Lock()
 
     def on_end(self, span: Any) -> None:
         """Called before OTel span.end(); span is still mutable."""

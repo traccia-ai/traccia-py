@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import time
@@ -9,10 +10,23 @@ from collections import deque
 from typing import Optional
 
 from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace import SpanProcessor as OTelSpanProcessor
 
 from traccia.errors import RateLimitError
+from traccia.utils.fork import reinit_after_fork
 
 logger = logging.getLogger(__name__)
+
+
+def _accepts_timeout(method) -> bool:
+    """Whether method takes a timeout keyword (Traccia's BatchSpanProcessor.shutdown does)."""
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.name == "timeout" or p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters
+    )
 
 
 class RateLimiter:
@@ -56,6 +70,7 @@ class RateLimiter:
         # Recent timestamps for sliding window (backup)
         self._recent_timestamps: deque = deque()
         self._window_seconds = 1.0
+        reinit_after_fork(self._at_fork_reinit)
     
     def acquire(self, span: Optional[ReadableSpan] = None) -> bool:
         """
@@ -122,6 +137,10 @@ class RateLimiter:
             
             return False
     
+    def _at_fork_reinit(self) -> None:
+        """In a child after os.fork(): the lock may be held by a thread that is gone."""
+        self._lock = threading.Lock()
+
     def _refill_tokens(self) -> None:
         """Refill tokens based on elapsed time (token bucket algorithm)."""
         now = time.time()
@@ -200,11 +219,19 @@ class RateLimitingSpanProcessor:
             return
         
         # Pass to next processor
+        if self.next_processor and hasattr(self.next_processor, 'on_ended'):
+            # on_ended() forwards only the spans admitted here.
+            span._rate_limit_admitted = True
         if self.next_processor and hasattr(self.next_processor, 'on_end'):
             self.next_processor.on_end(span)
+
+    def on_ended(self, span):
+        """Called once a Traccia span is ended - forward it if on_end() admitted it."""
+        if getattr(span, "_rate_limit_admitted", False):
+            self.next_processor.on_ended(span)
     
-    def shutdown(self):
-        """Shutdown processor and log final stats."""
+    def shutdown(self, timeout: Optional[float] = None):
+        """Shutdown processor and log final stats; timeout (seconds) reaches a next processor that accepts it."""
         stats = self.rate_limiter.get_stats()
         if stats["enabled"] and stats["dropped_spans"] > 0:
             logger.info(
@@ -214,10 +241,22 @@ class RateLimitingSpanProcessor:
             )
         
         if self.next_processor and hasattr(self.next_processor, 'shutdown'):
-            self.next_processor.shutdown()
+            if timeout is not None and _accepts_timeout(self.next_processor.shutdown):
+                self.next_processor.shutdown(timeout=timeout)
+            else:
+                self.next_processor.shutdown()
     
-    def force_flush(self, timeout_millis: int = 30000):
-        """Force flush - pass through to next processor."""
-        if self.next_processor and hasattr(self.next_processor, 'force_flush'):
+    def force_flush(self, timeout_millis: int = 30000, timeout: Optional[float] = None):
+        """
+        Force flush - pass through to next processor.
+
+        OTel calls this with timeout_millis; Traccia's provider and stop_tracing()
+        pass timeout in seconds. The next processor gets its own convention.
+        """
+        if not (self.next_processor and hasattr(self.next_processor, 'force_flush')):
+            return True
+        if timeout is not None:
+            timeout_millis = int(timeout * 1000)
+        if isinstance(self.next_processor, OTelSpanProcessor):
             return self.next_processor.force_flush(timeout_millis)
-        return True
+        return self.next_processor.force_flush(timeout=timeout_millis / 1000.0)
