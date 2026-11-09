@@ -1,6 +1,11 @@
 <div align="center">
 
-# Traccia
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://traccia.ai/Traccia%20logo%20white%20-transparent-.png">
+    <img src="https://traccia.ai/Traccia%20logo%20blue%20-transparent-.png" alt="Traccia" width="300">
+  </picture>
+</h1>
 
 **The AI agent control plane. Observe, evaluate, govern and prove what your agents do.**
 
