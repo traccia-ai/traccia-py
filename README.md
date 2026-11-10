@@ -22,7 +22,7 @@ An open-source Python SDK for tracing, evaluations, prompt management, and runti
 </div>
 
 - **Observe.** `init()` traces every OpenAI, Anthropic, Gemini and Groq call, with tokens and cost on each span. Send traces to Traccia or to any OTLP backend.
-- **Evaluate.** Score your agent on a dataset with `evaluate()`, locally or as a saved experiment, and fail a pull request when quality, cost or latency drops. Version prompts and load them at runtime.
+- **Evaluate.** Score your agent on a dataset with `evaluate()`, locally or as a saved experiment, and fail a pull request when quality falls or cost or latency goes over your limit. Version prompts and load them at runtime.
 - **Govern.** Check each LLM and tool call before it runs: stop an agent that overspends, loops or calls the wrong tool.
 - **Prove.** Keep evidence for the EU AI Act and HIPAA in the Compliance Hub.
 
@@ -51,7 +51,7 @@ export OPENAI_API_KEY="sk-..."
 from openai import OpenAI
 from traccia import init, observe
 
-init(use_otlp=False, enable_console_exporter=True)  # print spans in your terminal
+init(use_otlp=False, enable_metrics=False, enable_console_exporter=True)  # print spans in your terminal
 # init(endpoint="http://localhost:4318/v1/traces")  # or send them to Jaeger, Tempo, SigNoz...
 # init()  # or to Traccia: set TRACCIA_API_KEY from app.traccia.ai
 
@@ -70,7 +70,7 @@ answer("What is OpenTelemetry?")
 
 **3. See the trace**
 
-Each span records the model, tokens, cost, prompt, completion and latency. It prints in your terminal, shows up in your OTLP backend ([Jaeger](https://traccia.ai/docs/guides/local-jaeger/), [Grafana](https://traccia.ai/docs/guides/local-grafana/)), or appears under **Traces** in Traccia like the run above.
+Each LLM span records the model, tokens, cost, prompt, completion and latency. It prints in your terminal, shows up in your OTLP backend ([Jaeger](https://traccia.ai/docs/guides/local-jaeger/), [Grafana](https://traccia.ai/docs/guides/local-grafana/)), or appears under **Traces** in Traccia like the run above.
 
 ## Evaluate your agent
 
@@ -136,7 +136,7 @@ flowchart LR
     B -->|Allow| C["LLM or tool runs"]
     B -->|Reshape| D["Runs on a cheaper model<br/>or with fewer tokens"]
     B -->|Deny| E["AgentBlockedError<br/>provider never called"]
-    B -->|Hold| F["Waits for a person<br/>in Approvals"]
+    B -->|Hold| F["ApprovalPending raised<br/>approval queued"]
     C --> G["Spans over OTLP"]
     D --> G
     G --> H["Traccia"]
@@ -169,7 +169,7 @@ except AgentBlockedError as exc:
 The same wrapper runs the other policies, for example:
 
 - [Spend Cap](https://traccia.ai/docs/platform/policies/spend-cap/) stops a model call that would go over your USD budget, or moves it to a cheaper model.
-- [Refund Guard](https://traccia.ai/docs/platform/policies/refund-guard/) stops a refund over your limit. A middle amount can wait for a person to approve.
+- [Refund Guard](https://traccia.ai/docs/platform/policies/refund-guard/) stops a refund over your limit. For a middle amount, `@govern` raises `ApprovalPending` and queues the request for a person to approve.
 - [High-Risk Tool](https://traccia.ai/docs/platform/policies/high-risk-tool/) stops a tool you name, such as `delete_account`.
 
 See [all policies](https://traccia.ai/docs/platform/policies/). Each one runs in Observe (log a match), Warn (alert) or Block (stop the call) mode, so you can watch what a policy would stop before you turn it on.
