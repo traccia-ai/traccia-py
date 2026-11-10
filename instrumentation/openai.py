@@ -10,14 +10,20 @@ _patched = False
 _responses_patched = False
 
 
-def _compute_cost(model: Optional[str], prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
-    """Compute cost from token usage using pricing config."""
+def _compute_cost(
+    model: Optional[str],
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    vendor: str = "openai",
+) -> Optional[float]:
+    """Cost of one call, priced like its span: with the vendor it sets as llm.vendor, from the
+    shared resolver's table (which includes pricing overrides)."""
     if not model or prompt_tokens is None or completion_tokens is None:
         return None
     try:
+        from traccia.cost_resolver import get_resolver
         from traccia.processors.cost_engine import compute_cost as _compute
-        from traccia.pricing_config import load_pricing
-        return _compute(model, prompt_tokens, completion_tokens, load_pricing())
+        return _compute(model, prompt_tokens, completion_tokens, get_resolver().pricing_table, vendor=vendor)
     except Exception:
         return None
 
@@ -81,13 +87,20 @@ def _record_llm_metrics(
         pass
 
 
-def _safe_get(obj, path: str, default=None):
+def _safe_get(obj: Any, path: str, default: Any = None) -> Any:
     cur = obj
     for part in path.split("."):
         if cur is None:
             return default
         if isinstance(cur, dict):
             cur = cur.get(part)
+        elif isinstance(cur, (list, tuple)):
+            if not part.isdecimal():
+                return default
+            try:
+                cur = cur[int(part)]
+            except (IndexError, ValueError):
+                return default
         else:
             cur = getattr(cur, part, None)
     return cur if cur is not None else default
@@ -182,7 +195,7 @@ def patch_openai() -> bool:
                     from traccia.governance.pep import enforce_llm_call, finish_llm_call
                     from traccia.governance.policy import AgentBlockedError
 
-                    decision = enforce_llm_call(kwargs)
+                    decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                     if kwargs.get("model") and kwargs.get("model") != model:
                         span.set_attribute("llm.model", kwargs["model"])
                     resp = create_fn(*args, **kwargs)
@@ -394,10 +407,17 @@ def patch_openai_responses() -> bool:
             t0 = time.perf_counter()
             with tracer.start_as_current_span("llm.openai.responses", attributes=attributes) as span:
                 decision = None
+                target = None
                 try:
-                    from traccia.governance.pep import enforce_llm_call, finish_llm_call
+                    from traccia.governance.pep import (
+                        enforce_llm_call_off_loop,
+                        finish_llm_call_in_background,
+                    )
 
-                    decision = enforce_llm_call(kwargs)
+                    # Off the event loop, so a slow policy server delays no other task.
+                    decision, target = await enforce_llm_call_off_loop(
+                        kwargs, vendor=attributes.get("llm.vendor"), api=attributes.get("llm.api")
+                    )
                     resp = await create_fn(*args, **kwargs)
                     
                     # Extract response details
@@ -452,16 +472,18 @@ def patch_openai_responses() -> bool:
                         duration=duration_val,
                         cost=cost_val
                     )
-                    finish_llm_call(decision, actual_usd=cost_val)
+                    finish_llm_call_in_background(decision, target=target, actual_usd=cost_val)
                     return resp
-                except Exception as exc:
+                except BaseException as exc:
+                    # BaseException too: a cancelled call (asyncio.CancelledError, a wait_for()
+                    # timeout) releases its reservation instead of holding it until it expires.
                     try:
-                        from traccia.governance.pep import finish_llm_call as _finish
-                        _finish(decision, release=True)
+                        from traccia.governance.pep import finish_llm_call_in_background as _finish
+                        _finish(decision, target=target, release=True)
                     except Exception:
                         pass
                     span.record_exception(exc)
-                    span.set_status(SpanStatus.ERROR, str(exc))
+                    span.set_status(SpanStatus.ERROR, str(exc) or type(exc).__name__)
                     try:
                         from traccia.metrics.recorder import get_metrics_recorder
                         rec = get_metrics_recorder()

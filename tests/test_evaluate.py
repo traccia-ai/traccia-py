@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from traccia.eval.builtins import run_builtin_scorer
-from traccia.eval.evaluate import EvaluateResult, evaluate, _score_span_name
+from traccia.eval.evaluate import EvaluateResult, bind_scorer_name, evaluate, _score_span_name
 from traccia.eval.errors import EvaluateError
 
 
@@ -32,6 +32,7 @@ def test_builtin_stamps_type_and_scorer_name():
     assert scored["type"] == "contains"
     assert scored["scorer_name"] == "contains"
     assert scored["name"] == "contains"
+    assert scored["status"] == "judged"
 
 
 def test_evaluate_local_only():
@@ -255,3 +256,124 @@ def test_score_span_name_and_judge_annotation():
     assert attrs["llm.model"] == "gemini-3.6-flash"
     assert attrs["traccia.eval.scorer"] == "Helpfulness"
     assert attrs["llm.usage.total_tokens"] == 14
+
+
+def _quiet_evaluate(**kwargs):
+    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=False), patch(
+        "traccia.get_tracer"
+    ) as gt, patch("traccia.force_flush"):
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        tracer = MagicMock()
+        tracer.start_as_current_span.return_value = span
+        gt.return_value = tracer
+        return evaluate(persist=False, progress=False, **kwargs)
+
+
+def test_mapping_key_is_the_recorded_scorer_name():
+    def score_accuracy(input, output, expected, metadata):
+        return {"passed": True, "score": 1.0}
+
+    result = _quiet_evaluate(
+        name="alias",
+        data=[{"input": {"q": "a"}, "expected": "a"}],
+        task=lambda inp: inp["q"],
+        scorers=[bind_scorer_name(score_accuracy, "accuracy")],
+    )
+    score = result.rows[0]["panels"][0]["scores"][0]
+    assert score["name"] == "accuracy"
+    from traccia.eval.gate import report_from_rows
+
+    reported = report_from_rows(result.rows, scorers=["local:accuracy"])
+    assert reported[0]["name"] == "accuracy"
+    assert reported[0]["missing"] == 0
+    assert reported[0]["completed"] == 1
+
+
+def test_local_scorer_passed_flag_keeps_the_spec_name():
+    def score_accuracy(input, output, expected, metadata):
+        return {"passed": True, "name": "not-the-key"}
+
+    result = _quiet_evaluate(
+        name="alias",
+        data=[{"input": {"q": "a"}, "expected": "a"}],
+        task=lambda inp: inp["q"],
+        scorers=[bind_scorer_name(score_accuracy, "accuracy")],
+    )
+    score = result.rows[0]["panels"][0]["scores"][0]
+    assert score["name"] == "accuracy"
+    assert score["scorer_name"] == "accuracy"
+    assert score["score"] == 1.0
+    from traccia.eval.gate import report_from_rows
+
+    reported = report_from_rows(result.rows, scorers=["local:accuracy"])
+    assert reported[0]["completed"] == 1
+    assert reported[0]["errored"] == 0
+
+
+def test_platform_builtin_keeps_fetched_identity():
+    fetched = {
+        "id": "scorer-2",
+        "name": "wraps-exact-match",
+        "type": "exact_match",
+        "definition_hash": "sha256:platform",
+        "implementation_version": "1",
+        "scorer_snapshot_token": "token",
+        "config": {},
+    }
+    with patch("traccia.eval.evaluate.eval_client.fetch_scorer", return_value=fetched), patch(
+        "traccia.eval.evaluate.eval_client.score_remote"
+    ) as remote:
+        result = _quiet_evaluate(
+            name="platform-builtin",
+            data=[{"input": {"q": "hi"}, "expected": "hi"}],
+            task=lambda inp: inp["q"],
+            scorers=["wraps-exact-match"],
+        )
+    remote.assert_not_called()
+    score = result.rows[0]["panels"][0]["scores"][0]
+    assert score["passed"] is True
+    assert score["scorer_name"] == "wraps-exact-match"
+    assert score["scorer_id"] == "scorer-2"
+    assert score["definition_hash"] == "sha256:platform"
+    assert score["scorer_snapshot_token"] == "token"
+    assert "definition_identity" not in score
+
+
+def test_task_cost_reads_mapping_attributes_and_provider_children():
+    from types import MappingProxyType, SimpleNamespace
+
+    from traccia.eval.evaluate import _cost_from_span
+
+    priced = SimpleNamespace(attributes=MappingProxyType({"llm.cost.usd": 0.25}))
+    assert _cost_from_span(priced) == 0.25
+    child = SimpleNamespace(
+        name="chat.completions",
+        attributes={"llm.cost.usd": 0.1, "llm.model": "gpt-4o-mini"},
+    )
+    parent = SimpleNamespace(name="evaluate.item", attributes=MappingProxyType({}), children=[child])
+    assert _cost_from_span(parent) == 0.1
+
+
+def test_provider_child_cost_is_collected_from_the_sdk_provider():
+    import importlib
+    from types import SimpleNamespace
+
+    import traccia
+
+    evaluate_mod = importlib.import_module("traccia.eval.evaluate")
+
+    evaluate_mod._ensure_child_cost_processor()
+    token = evaluate_mod._task_child_costs.set([])
+    try:
+        tracer = traccia.get_tracer("traccia.eval.test")
+        with tracer.start_as_current_span("chat.completions") as span:
+            span.set_attribute("llm.model", "gpt-4o-mini")
+            span.set_attribute("llm.cost.usd", 0.25)
+        captured = list(evaluate_mod._task_child_costs.get() or [])
+    finally:
+        evaluate_mod._task_child_costs.reset(token)
+    assert captured == [{"cost": 0.25}]
+    parent = SimpleNamespace(name="evaluate.item", attributes={})
+    assert evaluate_mod._cost_from_span(parent, captured) == 0.25

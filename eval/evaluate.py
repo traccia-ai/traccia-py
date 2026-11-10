@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import json
 import logging
@@ -10,6 +11,7 @@ import sys
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
@@ -75,6 +77,7 @@ class EvaluateResult:
     url: Optional[str] = None
     persist_error: Optional[str] = None
     errors: List[Dict[str, Any]] = field(default_factory=list)
+    run_context: Dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> str:
         agg = self.aggregates or {}
@@ -153,6 +156,16 @@ def _panel_label(*, prompt: Optional[str]) -> str:
     return "Task"
 
 
+def bind_scorer_name(fn: Callable[..., Any], name: str) -> Callable[..., Any]:
+    """Keep the exported mapping key when the function itself has another name."""
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    wrapper.__name__ = name
+    return wrapper
+
+
 def _spec_name(spec: ScorerSpec) -> str:
     if isinstance(spec, str):
         return spec.strip() or "scorer"
@@ -206,9 +219,14 @@ def _annotate_score_span(span: Any, scored: Dict[str, Any]) -> None:
         pass
 
 
-def _cost_from_span(span: Any) -> Optional[float]:
-    attrs = getattr(span, "attributes", None) or {}
-    if not isinstance(attrs, dict):
+_task_child_costs: contextvars.ContextVar[Optional[List[Dict[str, Any]]]] = contextvars.ContextVar(
+    "traccia_eval_task_child_costs", default=None
+)
+_cost_processor_installed = False
+
+
+def _read_cost(attrs: Any) -> Optional[float]:
+    if not isinstance(attrs, Mapping):
         return None
     for key in ("llm.cost.usd", "platform_cost_usd", "traccia.cost.usd"):
         raw = attrs.get(key)
@@ -221,27 +239,110 @@ def _cost_from_span(span: Any) -> Optional[float]:
     return None
 
 
+def _provider_span(span: Any) -> bool:
+    attrs = getattr(span, "attributes", None)
+    if isinstance(attrs, Mapping) and (attrs.get("llm.model") or attrs.get("gen_ai.request.model")):
+        return True
+    name = str(getattr(span, "name", "") or "")
+    return name not in {"evaluate.item"} and not name.startswith("scorer.") and "llm" in name
+
+
+def _child_cost_processor_cls():
+    from opentelemetry.sdk.trace import SpanProcessor as OTelSpanProcessor
+
+    class _TaskChildCostProcessor(OTelSpanProcessor):
+        """Record provider span costs that end while a task is running."""
+
+        def on_start(self, span: Any, parent_context: Any = None) -> None:
+            return None
+
+        def on_end(self, span: Any) -> None:
+            bucket = _task_child_costs.get()
+            if bucket is None:
+                return
+            name = str(getattr(span, "name", "") or "")
+            if name == "evaluate.item" or name.startswith("scorer."):
+                return
+            if not _provider_span(span):
+                return
+            bucket.append({"cost": _read_cost(getattr(span, "attributes", None))})
+
+        def shutdown(self) -> None:
+            return None
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            return True
+
+    return _TaskChildCostProcessor
+
+
+def _ensure_child_cost_processor() -> None:
+    """Attach the collector to Traccia's provider, which is separate from the global one."""
+    global _cost_processor_installed
+    if _cost_processor_installed:
+        return
+    _cost_processor_installed = True
+    try:
+        import traccia
+
+        traccia.get_tracer_provider().add_span_processor(_child_cost_processor_cls()())
+    except Exception:  # noqa: BLE001
+        _cost_processor_installed = False
+
+
+def _cost_from_span(span: Any, child_costs: Optional[Sequence[Dict[str, Any]]] = None) -> Optional[float]:
+    own = _read_cost(getattr(span, "attributes", None))
+    if own is not None:
+        return own
+    nested: List[Dict[str, Any]] = list(child_costs or [])
+    for child in getattr(span, "children", None) or []:
+        if _provider_span(child):
+            nested.append({"cost": _cost_from_span(child)})
+    if not nested:
+        return None
+    if any(item.get("cost") is None for item in nested):
+        return None
+    return sum(float(item["cost"]) for item in nested)
+
+
 def _normalize_score(raw: Any, *, default_name: str) -> Dict[str, Any]:
     builtin = default_name if default_name in BUILTIN_SCORERS else None
     if isinstance(raw, dict):
         out = dict(raw)
-        name = out.get("scorer_name") or out.get("name") or default_name
-        out["name"] = name
-        out.setdefault("scorer_name", name)
-        if "type" not in out and name in BUILTIN_SCORERS:
-            out["type"] = name
+        out["name"] = default_name
+        out["scorer_name"] = default_name
+        if "type" not in out and default_name in BUILTIN_SCORERS:
+            out["type"] = default_name
         elif "type" not in out and builtin:
             out["type"] = builtin
+        if out.get("score") is None and isinstance(out.get("passed"), bool):
+            out["score"] = 1.0 if out["passed"] else 0.0
         if "passed" not in out and "score" in out:
             try:
                 out["passed"] = float(out["score"]) >= 0.5
             except (TypeError, ValueError):
                 out["passed"] = False
+        out.setdefault("status", "judged")
         out.setdefault("passed", False)
         return out
     if isinstance(raw, (int, float)):
         score = float(raw)
-        out = {"name": default_name, "scorer_name": default_name, "score": score, "passed": score >= 0.5}
+        if score != score or score in (float("inf"), float("-inf")):
+            return {
+                "name": default_name,
+                "scorer_name": default_name,
+                "status": "error",
+                "passed": None,
+                "score": None,
+                "reason": "non_finite_score",
+            }
+        out = {
+            "name": default_name,
+            "scorer_name": default_name,
+            "status": "judged",
+            "score": score,
+            "passed": score >= 0.5,
+        }
         if builtin:
             out["type"] = builtin
         return out
@@ -254,17 +355,31 @@ def _normalize_score(raw: Any, *, default_name: str) -> Dict[str, Any]:
         }
         if builtin:
             out["type"] = builtin
+        out.setdefault("status", "judged")
         return out
     out = {
         "name": default_name,
         "scorer_name": default_name,
-        "passed": False,
+        "status": "error",
+        "passed": None,
+        "score": None,
         "reason": "invalid_scorer_return",
-        "score": 0.0,
     }
     if builtin:
         out["type"] = builtin
     return out
+
+
+def _snapshot_needs_refresh(token: Optional[str], *, margin: float = 300) -> bool:
+    """True when a signed snapshot will expire before a long run finishes scoring."""
+    if not token or "." not in str(token):
+        return False
+    try:
+        payload = json.loads(str(token).rsplit(".", 1)[0])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    exp = payload.get("exp") if isinstance(payload, dict) else None
+    return isinstance(exp, (int, float)) and float(exp) <= time.time() + margin
 
 
 def _run_scorer(
@@ -292,11 +407,17 @@ def _run_scorer(
         except Exception as exc:  # noqa: BLE001
             return {
                 "name": name,
-                "passed": False,
+                "scorer_name": name,
+                "status": "error",
+                "passed": None,
+                "score": None,
                 "reason": f"scorer_error: {exc}",
-                "score": 0.0,
+                "definition_identity": "source_fallback",
             }
-        return _normalize_score(raw, default_name=name)
+        scored = _normalize_score(raw, default_name=name)
+        if not scored.get("definition_hash") and not scored.get("definition_identity"):
+            scored["definition_identity"] = "source_fallback"
+        return scored
 
     name = str(spec).strip()
     if name in BUILTIN_SCORERS:
@@ -308,6 +429,9 @@ def _run_scorer(
     if name not in scorer_cache:
         scorer_cache[name] = eval_client.fetch_scorer(name, **cred)
     scorer = scorer_cache[name]
+    if _snapshot_needs_refresh(scorer.get("scorer_snapshot_token")):
+        scorer = eval_client.fetch_scorer(name, **cred)
+        scorer_cache[name] = scorer
     stype = str(scorer.get("type") or "")
     if stype in BUILTIN_SCORERS:
         scored = run_builtin_scorer(
@@ -316,10 +440,19 @@ def _run_scorer(
             expected=row.get("expected_output"),
             config=scorer.get("config") or {},
         )
+        platform_name = str(scorer.get("name") or name)
         scored["scorer_id"] = str(scorer.get("id") or "")
-        scored["scorer_name"] = str(scorer.get("name") or name)
+        scored["scorer_name"] = platform_name
+        scored["name"] = platform_name
         scored["type"] = stype
         scored["config"] = scorer.get("config") or {}
+        if scorer.get("definition_hash"):
+            scored["definition_hash"] = scorer.get("definition_hash")
+        if scorer.get("implementation_version"):
+            scored["implementation_version"] = scorer.get("implementation_version")
+        if scorer.get("scorer_snapshot_token"):
+            scored["scorer_snapshot_token"] = scorer.get("scorer_snapshot_token")
+            scored.pop("definition_identity", None)
         return scored
 
     remote = eval_client.score_remote(
@@ -328,22 +461,33 @@ def _run_scorer(
         expected_output=row.get("expected_output"),
         input_data=row.get("input"),
         provider_keys=provider_keys,
+        scorer_snapshot_token=scorer.get("scorer_snapshot_token"),
         **cred,
     )
+    status = remote.get("status")
+    if status not in ("judged", "error"):
+        status = "judged" if remote.get("score") is not None and isinstance(remote.get("passed"), bool) else "error"
     out = {
         "scorer_id": str(remote.get("scorer_id") or scorer.get("id") or ""),
         "scorer_name": str(remote.get("scorer_name") or scorer.get("name") or name),
         "type": remote.get("type") or stype,
         "config": remote.get("config") or scorer.get("config") or {},
         "name": str(remote.get("scorer_name") or name),
-        "passed": bool(remote.get("passed")),
+        "status": status,
+        "passed": remote.get("passed") if status == "judged" else None,
         "reason": remote.get("reason"),
-        "score": remote.get("score"),
+        "score": remote.get("score") if status == "judged" else None,
         "model": remote.get("model"),
         "latency_ms": remote.get("latency_ms"),
-        "cost_usd": remote.get("cost_usd"),
         "usage": remote.get("usage") if isinstance(remote.get("usage"), dict) else None,
+        "definition_hash": remote.get("definition_hash") or scorer.get("definition_hash"),
+        "implementation_version": remote.get("implementation_version") or scorer.get("implementation_version"),
+        "scorer_snapshot_token": remote.get("scorer_snapshot_token") or scorer.get("scorer_snapshot_token"),
     }
+    if isinstance(remote.get("invocation"), dict):
+        out["invocation"] = remote["invocation"]
+    elif remote.get("cost_usd") is not None:
+        out["invocation"] = {"cost_usd": remote.get("cost_usd"), "model": remote.get("model")}
     if isinstance(remote.get("questions"), list):
         out["questions"] = remote["questions"]
     if "unsure" in remote:
@@ -377,6 +521,9 @@ def evaluate(
     prompt_api_base: Optional[str] = None,
     progress: bool = True,
     on_item_complete: Optional[Callable[[int, int, Dict[str, Any]], None]] = None,
+    prompt_version: Optional[int] = None,
+    prompt_label: Optional[str] = None,
+    run_context: Optional[Dict[str, Any]] = None,
 ) -> EvaluateResult:
     """Run task + scorers over a dataset or inline rows.
 
@@ -405,11 +552,23 @@ def evaluate(
     dataset_id: Optional[str] = None
     items: List[Dict[str, Any]]
     platform_scorer_ids: List[str] = []
+    dataset_snapshot_token: Optional[str] = None
+    dataset_fingerprint: Optional[str] = None
+    prompt_attachment = None
+    if prompt and prompt_version is None and not prompt_label:
+        prompt_attachment = "deprecated_production_default"
+        sys.stderr.write(
+            "warning: prompt without prompt_version or prompt_label still attaches production. "
+            "The next SDK release removes that default.\n"
+        )
 
     if isinstance(data, str):
         ds = eval_client.fetch_dataset(data.strip(), **cred)
         dataset_id = str(ds["id"])
-        raw_items = eval_client.fetch_dataset_items(dataset_id, **cred)
+        raw_payload = eval_client.fetch_dataset_items_payload(dataset_id, **cred)
+        raw_items = list(raw_payload.get("items") or [])
+        dataset_snapshot_token = raw_payload.get("dataset_snapshot_token")
+        dataset_fingerprint = raw_payload.get("dataset_fingerprint")
         items = [
             {
                 "id": str(it["id"]),
@@ -452,7 +611,12 @@ def evaluate(
     experiment_id = str(uuid.uuid4()) if persist else None
     prompt_version_ids: List[str] = []
     if persist and prompt:
-        prompt_version_ids = eval_client.resolve_prompt_version_ids(prompt, **cred)
+        prompt_version_ids = eval_client.resolve_prompt_version_ids(
+            prompt,
+            version=prompt_version,
+            label=prompt_label,
+            **cred,
+        )
 
     # Pre-resolve platform scorers for scorer_ids list
     scorer_cache: Dict[str, Dict[str, Any]] = {}
@@ -493,9 +657,13 @@ def evaluate(
 
         tracer = get_tracer("traccia.eval")
         with tracer.start_as_current_span("evaluate.item", attributes=attrs) as span:
+            cost_token = _task_child_costs.set([])
             try:
                 t0 = time.perf_counter()
+                _ensure_child_cost_processor()
                 output = _call_task(task, row)
+                child_costs = list(_task_child_costs.get() or [])
+                _task_child_costs.set(None)
                 cell["latency_ms"] = round((time.perf_counter() - t0) * 1000, 3)
                 output = _jsonable(output)
                 cell["output"] = output
@@ -524,29 +692,24 @@ def evaluate(
                             scored = {
                                 "name": spec_name,
                                 "scorer_name": spec_name,
-                                "passed": False,
+                                "status": "error",
+                                "passed": None,
+                                "score": None,
                                 "reason": f"scorer_error: {exc}",
-                                "score": 0.0,
                             }
                             if spec_name in BUILTIN_SCORERS:
                                 scored["type"] = spec_name
                         _annotate_score_span(score_span, scored)
                         scores.append(scored)
                 cell["scores"] = scores
-                score_cost = 0.0
-                score_cost_known = False
-                for s in scores:
-                    if s.get("cost_usd") is not None:
-                        try:
-                            score_cost += float(s["cost_usd"])
-                            score_cost_known = True
-                        except (TypeError, ValueError):
-                            pass
-                span_cost = _cost_from_span(span)
-                if span_cost is not None or score_cost_known:
-                    cell["cost_usd"] = (span_cost or 0.0) + score_cost
+                span_cost = _cost_from_span(span, child_costs)
+                if span_cost is None:
+                    cell["task_cost"] = {"usd": None, "coverage": "unknown", "basis": "instrumented_spans"}
+                else:
+                    cell["task_cost"] = {"usd": span_cost, "coverage": "complete", "basis": "instrumented_spans"}
+                cell["cost_usd"] = span_cost
                 span_attrs = getattr(span, "attributes", None) or {}
-                if isinstance(span_attrs, dict) and span_attrs.get("llm.model") and not cell.get("model"):
+                if isinstance(span_attrs, Mapping) and span_attrs.get("llm.model") and not cell.get("model"):
                     cell["model"] = str(span_attrs["llm.model"])
                 if scorers:
                     cell["passed"] = all(bool(s.get("passed")) for s in scores) if scores else None
@@ -567,6 +730,8 @@ def evaluate(
                     span.record_exception(exc)
                 except Exception:  # noqa: BLE001
                     pass
+            finally:
+                _task_child_costs.reset(cost_token)
 
             # Only attach when export is configured — otherwise Open Trace 404s.
             if tracing_ok:
@@ -690,10 +855,19 @@ def evaluate(
                 scorer_ids=platform_scorer_ids,
                 results={"rows": rows},
                 aggregates=aggregates,
+                run_context={
+                    **(run_context or {}),
+                    **({"dataset_fingerprint": dataset_fingerprint} if dataset_fingerprint else {}),
+                    **({"prompt_attachment": prompt_attachment} if prompt_attachment else {}),
+                    "latency_concurrency": max_concurrency,
+                    "latency_semantics": "task_wall_per_item",
+                },
+                dataset_snapshot_token=dataset_snapshot_token,
                 **cred,
             )
             result.url = created.get("url")
             result.experiment_id = str(created.get("id") or experiment_id)
+            result.run_context = created.get("run_context") or result.run_context
         except Exception as exc:  # noqa: BLE001
             result.persist_error = str(exc)
             # Keep in-memory results

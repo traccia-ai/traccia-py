@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List
 from traccia.tracer.span import Span
 from traccia.tracer.span import SpanStatus
 from traccia import runtime_config
+from traccia.utils.fork import reinit_after_fork
 
 
 class FileExporter:
@@ -33,6 +34,11 @@ class FileExporter:
         self.reset_on_start = reset_on_start
         self._lock = threading.Lock()
         self._first_export = True
+        reinit_after_fork(self._at_fork_reinit)
+
+    def _at_fork_reinit(self) -> None:
+        """In a child after os.fork(): the lock may be held by an export that is gone."""
+        self._lock = threading.Lock()
 
     def export(self, spans: Iterable[Span]) -> bool:
         """

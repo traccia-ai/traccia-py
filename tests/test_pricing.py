@@ -58,13 +58,12 @@ class TestCostEngine:
         cost = compute_cost("definitely-not-a-model", 100, 100, pricing_table={})
         assert cost is None
 
-    def test_prefix_longer_key_wins(self):
-        """gpt-4o should not be matched by gpt-4 key when gpt-4o exists."""
+    def test_no_prefix_guess(self):
+        """gpt-4o-mini is a different model from gpt-4 and gpt-4o, so it gets no price."""
         from traccia.processors.cost_engine import _lookup_price
         table = {"gpt-4": {"prompt": 0.03, "completion": 0.06},
                  "gpt-4o": {"prompt": 0.005, "completion": 0.015}}
-        key, _ = _lookup_price("gpt-4o-mini", table)
-        assert key == "gpt-4o"
+        assert _lookup_price("gpt-4o-mini", table) is None
 
     def test_provider_prefixed_grok_matches_short_model(self):
         from traccia.processors.cost_engine import _lookup_price
@@ -231,6 +230,35 @@ class TestCostAnnotatingProcessor:
         assert "llm.pricing.snapshot_version" in span.attributes
         assert "llm.pricing.source" in span.attributes
         assert span.attributes["llm.pricing.source"] == "local_cache"
+
+    def test_match_attributes_set(self):
+        proc = self._make_processor()
+        span = _FakeSpan({
+            "llm.model": "gpt-4o-2099-01-01",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 500,
+        })
+        proc.on_end(span)
+        assert span.attributes["llm.pricing.model_key"] == "gpt-4o"
+        assert span.attributes["llm.pricing.match_kind"] == "base"
+
+    def test_vendor_selects_provider_price(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+        table = {
+            "together_ai/openai/gpt-oss-120b": {"prompt": 1.0, "completion": 1.0, "_provider": "together_ai"},
+            "groq/openai/gpt-oss-120b": {"prompt": 0.1, "completion": 0.1, "_provider": "groq"},
+        }
+        proc = CostAnnotatingProcessor(pricing_table=table)
+        span = _FakeSpan({
+            "llm.vendor": "groq",
+            "llm.model": "openai/gpt-oss-120b",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 1000,
+        })
+        proc.on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(0.2)
+        assert span.attributes["llm.pricing.model_key"] == "groq/openai/gpt-oss-120b"
+        assert span.attributes["llm.pricing.provider"] == "groq"
 
     def test_llm_usage_source_set_and_alias(self):
         proc = self._make_processor()
@@ -505,3 +533,327 @@ class TestCostResolver:
         for t in threads:
             t.join()
         assert errors == [], f"Thread safety errors: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Strict vendors: a Groq call is priced only from Groq's own entries
+# ---------------------------------------------------------------------------
+
+GROQ_TABLE = {
+    "ovhcloud/Qwen3-32B": {"prompt": 0.00008, "completion": 0.00023, "_provider": "ovhcloud"},
+    "groq/qwen/qwen3-32b": {"prompt": 0.00029, "completion": 0.00059, "_provider": "groq"},
+    "groq/openai/gpt-oss-120b": {"prompt": 0.00015, "completion": 0.0006, "cached_prompt": 0.000075, "_provider": "groq"},
+    "groq/openai/gpt-oss-120b-2025-08-05": {"prompt": 0.0001, "completion": 0.0005, "_provider": "groq"},
+    "fireworks_ai/accounts/fireworks/models/gemma2-9b-it": {"prompt": 0.0002, "completion": 0.0002, "_provider": "fireworks_ai"},
+    "kimi-k2": {"prompt": 0.001, "completion": 0.003, "_provider": "groq"},
+}
+
+
+class TestStrictVendorPricing:
+    def test_groq_model_is_priced_at_the_groq_key(self):
+        from traccia.processors.cost_engine import compute_cost, match_pricing_model_key
+
+        assert match_pricing_model_key("qwen/qwen3-32b", GROQ_TABLE, "groq") == "groq/qwen/qwen3-32b"
+        assert compute_cost("qwen/qwen3-32b", 1000, 1000, GROQ_TABLE, vendor="groq") == pytest.approx(0.00088)
+
+    def test_groq_model_never_takes_another_providers_price(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE) is not None
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE, "groq") is None
+
+    def test_entry_provider_counts_without_a_key_prefix(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2", GROQ_TABLE, "GROQ") == "kimi-k2"
+
+    def test_base_name_drops_a_date_and_the_exact_dated_key_wins(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("openai/gpt-oss-120b-20250101", GROQ_TABLE, "groq") == "groq/openai/gpt-oss-120b"
+        assert (
+            match_pricing_model_key("openai/gpt-oss-120b-2025-08-05", GROQ_TABLE, "groq")
+            == "groq/openai/gpt-oss-120b-2025-08-05"
+        )
+
+    def test_no_name_prefix_match(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2-instruct-0905", GROQ_TABLE, "groq") is None
+        assert match_pricing_model_key("openai/gpt-oss-120b-long", GROQ_TABLE, "groq") is None
+
+    def test_other_vendors_are_not_strict(self):
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        assert match_pricing_model_key("kimi-k2", GROQ_TABLE, "openai") == "kimi-k2"
+        assert match_pricing_model_key("gemma2-9b-it", GROQ_TABLE, "openai") is not None
+
+    def test_cost_processor_uses_the_span_vendor(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+
+        span = MagicMock()
+        span.attributes = {
+            "llm.vendor": "groq",
+            "llm.model": "openai/gpt-oss-120b",
+            "llm.usage.prompt_tokens": 200,
+            "llm.usage.cache_read_tokens": 800,
+            "llm.usage.completion_tokens": 0,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        CostAnnotatingProcessor(pricing_table=GROQ_TABLE).on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(0.00003 + 0.00006)
+        assert span.attributes["llm.pricing.model_key"] == "groq/openai/gpt-oss-120b"
+
+    def test_cost_processor_leaves_an_unpriced_groq_span(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+
+        span = MagicMock()
+        span.attributes = {
+            "llm.vendor": "groq",
+            "llm.model": "gemma2-9b-it",
+            "llm.usage.prompt_tokens": 100,
+            "llm.usage.completion_tokens": 50,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        CostAnnotatingProcessor(pricing_table=GROQ_TABLE).on_end(span)
+        assert "llm.cost.usd" not in span.attributes
+
+
+# ---------------------------------------------------------------------------
+# An explicit override wins over a strict vendor's bundled entry
+# ---------------------------------------------------------------------------
+
+LLAMA = "llama-3.3-70b-versatile"
+LLAMA_OVERRIDE = {LLAMA: {"prompt": 1.0, "completion": 2.0}}  # $3.00 for 1K in + 1K out
+
+
+class TestOverridesWinForStrictVendors:
+    def test_programmatic_override_prices_a_groq_call(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost, match_pricing_model_key
+
+        monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+        monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+        table, source, _ = load_pricing_with_source(LLAMA_OVERRIDE)
+        assert source == "override"
+        assert match_pricing_model_key(LLAMA, table, "groq") == LLAMA
+        assert compute_cost(LLAMA, 1000, 1000, table, vendor="groq") == pytest.approx(3.0)
+        # Groq's own name for the model is the same model.
+        assert compute_cost(f"groq/{LLAMA}", 1000, 1000, table, vendor="groq") == pytest.approx(3.0)
+
+    def test_env_override_prices_a_groq_call(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        monkeypatch.setenv("TRACCIA_PRICING_OVERRIDE_JSON", json.dumps(LLAMA_OVERRIDE))
+        table, source, _ = load_pricing_with_source()
+        assert source == "env"
+        assert compute_cost(LLAMA, 1000, 1000, table, vendor="groq") == pytest.approx(3.0)
+
+    def test_without_an_override_groq_keeps_its_bundled_price(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+        monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+        table, _, _ = load_pricing_with_source()
+        assert compute_cost(LLAMA, 1000, 1000, table, vendor="groq") == pytest.approx(0.00138)
+
+    def test_an_override_for_another_model_does_not_leak_into_groq(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+        monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+        table, _, _ = load_pricing_with_source({"gemma2-9b-it": {"prompt": 1.0, "completion": 1.0}})
+        # An explicit override is the user's price for that model name, whoever serves it.
+        assert match_pricing_model_key("gemma2-9b-it", table, "groq") == "gemma2-9b-it"
+        assert match_pricing_model_key(LLAMA, table, "groq") == f"groq/{LLAMA}"
+
+    def test_an_override_for_another_provider_does_not_price_a_groq_call(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost, match_pricing_model_key
+
+        monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+        monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+        other = {"prompt": 0.01, "completion": 0.01, "_provider": "together_ai"}
+        table, _, _ = load_pricing_with_source({f"together_ai/{LLAMA}": other})
+        assert match_pricing_model_key(LLAMA, table, "groq") == f"groq/{LLAMA}"
+        assert compute_cost(LLAMA, 1000, 1000, table, vendor="groq") == pytest.approx(0.00138)
+        # An override that names Groq, or names no provider, is used.
+        table, _, _ = load_pricing_with_source({LLAMA: {"prompt": 1.0, "completion": 2.0, "_provider": "groq"}})
+        assert compute_cost(LLAMA, 1000, 1000, table, vendor="groq") == pytest.approx(3.0)
+
+    @pytest.mark.parametrize(
+        "model, override_key, used",
+        [
+            (LLAMA, LLAMA, True),
+            (LLAMA, f"groq/{LLAMA}", True),
+            (LLAMA, f"together_ai/{LLAMA}", False),  # the provider is only in the key
+            ("openai/gpt-oss-120b", "openai/gpt-oss-120b", True),  # "openai" is the model's org
+            ("openai/gpt-oss-120b", "gpt-oss-120b", True),
+            ("openai/gpt-oss-120b", "groq/openai/gpt-oss-120b", True),
+            ("openai/gpt-oss-120b", "together_ai/openai/gpt-oss-120b", False),
+        ],
+    )
+    def test_an_override_key_path_naming_another_provider_is_skipped(self, monkeypatch, model, override_key, used):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+        monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+        table, _, _ = load_pricing_with_source({override_key: {"prompt": 1.0, "completion": 1.0}})
+        assert (match_pricing_model_key(model, table, "groq") == override_key) is used
+# An explicit override wins over the vendor's bundled entries
+# ---------------------------------------------------------------------------
+
+GPT4O_OVERRIDE = {"gpt-4o": {"prompt": 1.0, "completion": 2.0}}  # $3.00 for 1K in + 1K out
+
+
+@pytest.fixture
+def no_env_override(monkeypatch):
+    monkeypatch.delenv("TRACCIA_PRICING_OVERRIDE_JSON", raising=False)
+    monkeypatch.delenv("AGENT_DASHBOARD_PRICING_JSON", raising=False)
+
+
+class TestOverridesWinOverVendorMatching:
+    def test_programmatic_override_prices_an_openai_call(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost, match_pricing_model_key
+
+        table, source, _ = load_pricing_with_source(GPT4O_OVERRIDE)
+        assert source == "override"
+        assert match_pricing_model_key("gpt-4o", table, "openai") == "gpt-4o"
+        assert compute_cost("gpt-4o", 1000, 1000, table, vendor="openai") == pytest.approx(3.0)
+
+    def test_env_override_prices_an_openai_call(self, monkeypatch):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        monkeypatch.setenv("TRACCIA_PRICING_OVERRIDE_JSON", json.dumps(GPT4O_OVERRIDE))
+        table, source, _ = load_pricing_with_source()
+        assert source == "env"
+        assert compute_cost("gpt-4o", 1000, 1000, table, vendor="openai") == pytest.approx(3.0)
+
+    def test_override_prices_a_groq_call(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        table, _, _ = load_pricing_with_source({"llama-3.3-70b-versatile": {"prompt": 1.0, "completion": 2.0}})
+        assert compute_cost("llama-3.3-70b-versatile", 1000, 1000, table, vendor="groq") == pytest.approx(3.0)
+
+    def test_override_for_the_vendors_alias_family_is_used(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        override = {"gemini/gemini-2.0-flash-001": {"prompt": 1.0, "completion": 2.0}}
+        table, _, _ = load_pricing_with_source(override)
+        assert compute_cost("models/gemini-2.0-flash-001", 1000, 1000, table, vendor="google_gemini") == pytest.approx(3.0)
+
+    def test_without_an_override_the_vendor_price_is_unchanged(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        table, _, _ = load_pricing_with_source()
+        assert compute_cost("gpt-4o", 1000, 1000, table, vendor="openai") == pytest.approx(
+            compute_cost("gpt-4o", 1000, 1000, None, vendor="openai")
+        )
+        assert compute_cost("gpt-4o", 1000, 1000, table, vendor="openai") != pytest.approx(3.0)
+
+    def test_override_naming_another_provider_is_skipped(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import compute_cost
+
+        bundled = compute_cost("llama-3.3-70b-versatile", 1000, 1000, None, vendor="groq")
+        other = {"prompt": 1.0, "completion": 2.0, "_provider": "together_ai"}
+        table, _, _ = load_pricing_with_source({"llama-3.3-70b-versatile": other})
+        assert compute_cost("llama-3.3-70b-versatile", 1000, 1000, table, vendor="groq") == pytest.approx(bundled)
+
+    @pytest.mark.parametrize(
+        "model, vendor, override_key, used",
+        [
+            ("llama-3.3-70b-versatile", "groq", "llama-3.3-70b-versatile", True),
+            ("llama-3.3-70b-versatile", "groq", "groq/llama-3.3-70b-versatile", True),
+            ("llama-3.3-70b-versatile", "groq", "together_ai/llama-3.3-70b-versatile", False),
+            ("openai/gpt-oss-120b", "groq", "openai/gpt-oss-120b", True),  # "openai" is the model's org
+            ("openai/gpt-oss-120b", "groq", "gpt-oss-120b", True),
+            ("openai/gpt-oss-120b", "groq", "groq/openai/gpt-oss-120b", True),
+            ("openai/gpt-oss-120b", "groq", "together_ai/openai/gpt-oss-120b", False),
+            ("gpt-4o", "openai", "azure/gpt-4o", False),
+            ("gpt-4o", "azure_openai", "azure/gpt-4o", True),
+        ],
+    )
+    def test_override_key_path(self, no_env_override, model, vendor, override_key, used):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_engine import match_pricing_model_key
+
+        table, _, _ = load_pricing_with_source({override_key: {"prompt": 1.0, "completion": 1.0}})
+        assert (match_pricing_model_key(model, table, vendor) == override_key) is used
+
+    def test_cost_processor_records_the_override(self, no_env_override):
+        from traccia.pricing_config import load_pricing_with_source
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+
+        table, _, _ = load_pricing_with_source(GPT4O_OVERRIDE)
+        span = MagicMock()
+        span.attributes = {
+            "llm.vendor": "openai",
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 1000,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        CostAnnotatingProcessor(pricing_table=table, pricing_source="override").on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(3.0)
+        assert span.attributes["llm.pricing.model_key"] == "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# Integration cost helpers price like the span: with the vendor, from the shared table
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def resolver_with_override(monkeypatch, no_env_override):
+    """The shared resolver holding a table with a $3.00 gpt-4o and claude-sonnet-4-5 override."""
+    import traccia.cost_resolver as cr
+    from traccia.pricing_config import load_pricing_with_source
+
+    override = {**GPT4O_OVERRIDE, "claude-sonnet-4-5": {"prompt": 1.0, "completion": 2.0}}
+    table, source, generated_at = load_pricing_with_source(override)
+    monkeypatch.setattr(cr, "_resolver", cr.CostResolver(table, source, generated_at))
+
+
+class TestIntegrationCostHelpers:
+    def test_gemini_cost_uses_the_gemini_api_rate(self, no_env_override):
+        from traccia.instrumentation.gemini import _compute_cost
+        from traccia.processors.cost_engine import compute_cost
+
+        expected = compute_cost("gemini-2.0-flash-001", 1_000_000, 1_000_000, vendor="google_gemini")
+        assert expected == pytest.approx(0.5)
+        assert _compute_cost("gemini-2.0-flash-001", 1_000_000, 1_000_000) == pytest.approx(expected)
+
+    def test_openai_cost_uses_the_shared_table_with_overrides(self, resolver_with_override):
+        from traccia.instrumentation.openai import _compute_cost
+
+        assert _compute_cost("gpt-4o", 1000, 1000) == pytest.approx(3.0)
+
+    def test_anthropic_cost_uses_the_shared_table_with_overrides(self, resolver_with_override):
+        from traccia.instrumentation.anthropic import _compute_cost
+
+        assert _compute_cost("claude-sonnet-4-5", 1000, 1000) == pytest.approx(3.0)
+
+    def test_agent_enricher_fallback_prices_with_the_span_vendor(self, resolver_with_override):
+        from traccia.processors.agent_enricher import AgentEnrichmentProcessor
+
+        span = MagicMock()
+        span.attributes = {
+            "agent.id": "agent-1",
+            "llm.vendor": "openai",
+            "llm.model": "gpt-4o",
+            "llm.usage.prompt_tokens": 1000,
+            "llm.usage.completion_tokens": 1000,
+        }
+        span.set_attribute.side_effect = lambda k, v: span.attributes.__setitem__(k, v)
+        AgentEnrichmentProcessor().on_end(span)
+        assert span.attributes["llm.cost.usd"] == pytest.approx(3.0)

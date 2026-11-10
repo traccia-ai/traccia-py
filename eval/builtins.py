@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Callable, Dict, Optional
 
 BUILTIN_SCORERS = frozenset({"exact_match", "contains", "json_valid"})
+
+
+def builtin_definition_hash(name: str) -> str:
+    payload = '{"implementation_version":"1","type":"' + name + '"}'
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _normalize_text(value: Any) -> str:
@@ -91,6 +97,9 @@ def run_builtin_scorer(
         raise ValueError(f"Unknown builtin scorer: {name}")
     out = impl(output=output, expected=expected, config=config)
     out.setdefault("name", name)
+    out.setdefault("status", "judged")
     out["type"] = name
     out["scorer_name"] = name
+    out.setdefault("definition_hash", builtin_definition_hash(name))
+    out.setdefault("definition_identity", "builtin")
     return out

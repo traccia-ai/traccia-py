@@ -33,6 +33,8 @@ class Span:
         otel_span: OTelSpan,
         tracer: "Tracer",
         parent_span_id: Optional[str] = None,
+        name: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Initialize span wrapper.
@@ -41,6 +43,8 @@ class Span:
             otel_span: OpenTelemetry Span instance
             tracer: Traccia Tracer instance  
             parent_span_id: Parent span ID (hex string, for compatibility)
+            name: Span name as requested at start
+            attributes: Attributes requested at start
         """
         self._otel_span = otel_span
         self.tracer = tracer
@@ -78,6 +82,22 @@ class Span:
         # Maintain attribute dict for easy access
         # This mirrors OTel span attributes
         self._attributes: Dict[str, Any] = {}
+
+        # Unsampled (non-recording) OTel spans keep neither name nor attributes.
+        # Hold them here so enrichment (e.g. cost from model and token counts)
+        # works the same at any sample rate; they are still never exported.
+        if not otel_span.is_recording():
+            if name is not None:
+                self.name = name
+            if attributes:
+                self._attributes.update(attributes)
+            # get_current_span() returns this wrapper instead of a new one, so
+            # attributes set through it reach the same dict.
+            try:
+                if getattr(otel_span, "_traccia_span", None) is None:
+                    otel_span._traccia_span = self
+            except Exception:
+                pass
 
     def _format_trace_state(self, trace_state) -> Optional[str]:
         """Format OTel TraceState to W3C string format."""
@@ -300,18 +320,38 @@ class Span:
             except Exception:
                 pass
         
-        # 1. Run enrichment processors (span is still mutable)
-        self.tracer._run_enrichment_processors(self)
-        
-        # 2. End the OTel span (makes it immutable)
+        self._end_interrupted = False
         try:
-            self._otel_span.end(end_time=self.end_time_ns)
-        except Exception:
-            pass
+            # 1. Run enrichment processors (span is still mutable)
+            self.tracer._run_enrichment_processors(self)
+
+            # 2. End the OTel span (makes it immutable)
+            try:
+                self._otel_span.end(end_time=self.end_time_ns)
+            except Exception:
+                pass
+        except BaseException:
+            # e.g. KeyboardInterrupt: the span is not ended, and processors
+            # waiting for it to end (batching at shutdown) stop waiting.
+            self._end_interrupted = True
+            raise
         
         # 3. OTel export processors run automatically on ReadableSpan
         
         self._ended = True
+
+        # 4. Processors that need the ended span (e.g. batching for export)
+        self.tracer._run_ended_processors(self)
+
+        # 5. The run is over once its local root span ends; drop its policy evidence.
+        # Ask the OTel span: wrappers from get_current_span() carry no parent_span_id.
+        if getattr(self._otel_span, "parent", False) is None:
+            try:
+                from traccia.governance.evidence import forget_trace
+
+                forget_trace(self.context.trace_id)
+            except Exception:
+                pass
 
     # Context manager support
     def __enter__(self) -> "Span":

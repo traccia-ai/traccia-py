@@ -11,7 +11,7 @@ from typing import Optional, Any
 
 from traccia.exporter import ConsoleExporter, FileExporter, OTLPExporter
 from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT
-from traccia.instrumentation import patch_anthropic, patch_gemini, patch_openai, patch_requests
+from traccia.instrumentation import patch_anthropic, patch_gemini, patch_groq, patch_openai, patch_requests
 from traccia.processors import (
     BatchSpanProcessor,
     Sampler,
@@ -25,6 +25,7 @@ import threading
 import time
 from traccia.tracer.provider import TracerProvider
 from traccia import config as sdk_config
+from traccia import client_config
 from traccia import runtime_config
 from traccia import auto_instrumentation
 
@@ -39,6 +40,19 @@ _active_processor: Optional[BatchSpanProcessor] = None
 _init_method: Optional[str] = None  # Track how SDK was initialized: "init" or "start_tracing"
 _auto_trace_context: Optional[Any] = None  # Context for auto-started trace
 _auto_trace_name: str = "root"  # Default name for auto-started trace
+
+
+def _configure_governance(config: dict, config_file: Optional[str]) -> None:
+    """Apply governance settings from init() and drop them from *config* (start_tracing() does not take them)."""
+    from traccia.governance.config import configure_governance
+
+    configure_governance(
+        status_check_endpoint=config.pop("status_check_endpoint", None),
+        post_block_endpoint=config.pop("post_block_endpoint", None),
+        status_cache_ttl_seconds=config.pop("status_cache_ttl_seconds", None),
+        policy_fail_mode=config.pop("policy_fail_mode", None),
+        config_file=config_file,
+    )
 
 
 def init(
@@ -62,7 +76,10 @@ def init(
         auto_start_trace: If True, automatically start a root trace (default: True)
         auto_trace_name: Name for auto-started trace (default: "root")
         config_file: Optional explicit path to config file
-        **kwargs: All parameters from start_tracing() can be passed here
+        **kwargs: All parameters from start_tracing() can be passed here, plus
+            policy_fail_mode ("open" or "closed"): overrides your Traccia setting for
+            what @govern policy checks do when Traccia gives no answer. Default: follow
+            the setting (Settings -> Policy Enforcement), else block.
         
     Returns:
         TracerProvider instance
@@ -84,6 +101,9 @@ def init(
                 "Calling init() will not re-initialize. "
                 "Use stop_tracing() first if you need to re-initialize."
             )
+        # Tracing stays as it is, but policy checks start afresh (TRC-342): no
+        # remembered fail mode, and this call's policy_fail_mode applies.
+        _configure_governance(kwargs, config_file)
         return _get_provider()
     
     # Load config file if exists (lowest priority)
@@ -129,14 +149,7 @@ def init(
     merged_config.update(rate_limit_config)
 
     # Optional advanced governance overrides (defaults derive from tracing endpoint)
-    from traccia.governance.config import configure_governance
-
-    configure_governance(
-        status_check_endpoint=merged_config.pop("status_check_endpoint", None),
-        post_block_endpoint=merged_config.pop("post_block_endpoint", None),
-        status_cache_ttl_seconds=merged_config.pop("status_cache_ttl_seconds", None),
-        config_file=config_file,
-    )
+    _configure_governance(merged_config, config_file)
     
     # Initialize via start_tracing with full config
     provider = start_tracing(**merged_config)
@@ -401,6 +414,8 @@ def start_tracing(
     provider = _get_provider()
     key = env_cfg.get("api_key") or api_key
     endpoint = env_cfg.get("endpoint") or endpoint
+    # Policy, prompts and evals use this key/endpoint pair when it has a key.
+    client_config.set_client_config(key, endpoint or DEFAULT_OTLP_TRACE_ENDPOINT)
     try:
         sample_rate = float(env_cfg.get("sample_rate", sample_rate))
     except Exception:
@@ -514,15 +529,19 @@ def start_tracing(
         existing_attrs.update(resource_attrs)
         # Create new resource with merged attributes
         new_resource = OTelResource.create(existing_attrs)
-        # Recreate OTel provider with updated resource
-        provider._otel_provider = OTelTracerProvider(resource=new_resource)
+        # Recreate OTel provider with updated resource, keeping its sampler
+        provider._otel_provider = OTelTracerProvider(
+            resource=new_resource,
+            sampler=provider._otel_provider.sampler,
+        )
         # Re-add any existing export processors to the new provider
         for proc in provider._export_processors:
             provider._otel_provider.add_span_processor(proc)
 
     # Use OTLP exporter by default for network export
     if exporter:
-        network_exporter = exporter
+        # The caller owns this exporter; stop_tracing() leaves it open.
+        network_exporter = _CallerOwnedExporter(exporter)
     elif use_otlp:
         # Use OTLP exporter (OpenTelemetry standard)
         network_exporter = OTLPExporter(
@@ -550,12 +569,10 @@ def start_tracing(
         )
 
     sampler = Sampler(sample_rate)
-    # Use the sampler at trace start (head sampling) and also to make the
-    # batch processor respect trace_flags.
-    try:
-        provider.set_sampler(sampler)
-    except Exception:
-        pass
+    # Applies parent-based head sampling to the OTel provider, so unsampled
+    # traces are non-recording at span creation and every export path skips
+    # them. The custom BatchSpanProcessor also drops trace_flags=0 spans.
+    provider.set_sampler(sampler)
 
     # Ordering matters: enrich spans before batching/export.
     if enable_token_counting:
@@ -663,11 +680,21 @@ def start_tracing(
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
     # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor
+    caller_owned_otlp = isinstance(network_exporter, _CallerOwnedExporter) and isinstance(
+        network_exporter.exporter, OTLPExporter
+    )
+    if caller_owned_otlp:
+        # OTel's BatchSpanProcessor exports a caller's OTLPExporter directly, as before.
+        network_exporter = network_exporter.exporter
     if use_otlp and isinstance(network_exporter, OTLPExporter) and hasattr(network_exporter, '_otel_exporter'):
         # Use OTel's BatchSpanProcessor for OTLP export
         from opentelemetry.sdk.trace.export import BatchSpanProcessor as OTelBatchSpanProcessor
+        otel_exporter = network_exporter._otel_exporter
+        if caller_owned_otlp:
+            # OTel's processor shuts its exporter down; the caller's stays open.
+            otel_exporter = _CallerOwnedSpanExporter(otel_exporter)
         otel_processor = OTelBatchSpanProcessor(
-            network_exporter._otel_exporter,
+            otel_exporter,
             max_queue_size=max_queue_size,
             max_export_batch_size=max_export_batch_size,
             schedule_delay_millis=schedule_delay_millis,
@@ -748,6 +775,10 @@ def start_tracing(
         except Exception:
             pass
         try:
+            patch_groq()
+        except Exception:
+            pass
+        try:
             patch_requests()
         except Exception:
             pass
@@ -807,7 +838,15 @@ def force_flush(flush_timeout: Optional[float] = None) -> None:
 def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     """Force flush and shutdown registered processors and provider."""
     global _started, _init_method, _auto_trace_context, _metrics_shutdown
-    
+
+    # Stop and settle LLM calls still in flight, so their spans end before the flush below.
+    try:
+        from traccia.governance.pep import settle_open_calls
+
+        settle_open_calls(timeout=flush_timeout if flush_timeout is not None else 10.0)
+    except Exception:
+        pass
+
     # End auto-trace if active
     if _auto_trace_context:
         _cleanup_auto_trace()
@@ -815,12 +854,15 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
     _stop_pricing_refresh()
     provider = _get_provider()
     if _active_processor:
-        try:
-            _active_processor.force_flush(timeout=flush_timeout)
-        finally:
+        # shutdown() exports what is still queued, bounded by flush_timeout when
+        # given (0 or None: the processor's own shutdown timeout).
+        if flush_timeout:
+            _active_processor.shutdown(timeout=flush_timeout)
+        else:
             _active_processor.shutdown()
     provider.shutdown()
     _flush_and_shutdown_metrics(flush_timeout)
+    client_config.clear_client_config()
     _started = False
     _init_method = None
     _metrics_shutdown = True  # ensure flag set even if _flush_and_shutdown_metrics skipped
@@ -832,16 +874,27 @@ def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanPr
         return
 
     def _cleanup():
-        # If stop_tracing() was already called (e.g. from app finally block), skip to avoid double shutdown
-        if not _started:
-            return
+        # As stop_tracing() does: LLM calls still in flight end their spans before the flush.
+        # Skipped when stop_tracing() already ran (e.g. from an app finally block).
+        if _started:
+            try:
+                from traccia.governance.pep import settle_open_calls
+
+                settle_open_calls()
+            except Exception:
+                pass
         try:
-            if processor:
-                processor.force_flush()
-                processor.shutdown()
+            # shutdown() exports what is still queued, bounded by its own timeout. It is
+            # idempotent: after stop_tracing() it returns at once, and if shutdown is
+            # still under way (an exporter called stop_tracing() from inside an export)
+            # it waits for the final flush, so the process does not exit in the middle.
+            for proc in {id(p): p for p in (processor, _active_processor) if p}.values():
+                proc.shutdown()
         finally:
-            provider.shutdown()
-            _flush_and_shutdown_metrics(5.0)
+            # If stop_tracing() was already called (e.g. from app finally block), skip the rest
+            if _started:
+                provider.shutdown()
+                _flush_and_shutdown_metrics(5.0)
 
     atexit.register(_cleanup)
     _registered_shutdown = True
@@ -938,9 +991,40 @@ def _combine_exporters(primary, secondary):
         def shutdown(self):
             for exp in (primary, secondary):
                 if hasattr(exp, "shutdown"):
-                    exp.shutdown()
+                    try:
+                        exp.shutdown()
+                    except Exception:
+                        import logging
+                        logging.getLogger(__name__).exception("Exporter shutdown failed")
 
     return _Multi()
+
+
+class _CallerOwnedExporter:
+    """An exporter passed to start_tracing(); the caller decides when to shut it down."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+
+class _CallerOwnedSpanExporter:
+    """The OTel exporter inside a caller's OTLPExporter, as OTel's BatchSpanProcessor sees it."""
+
+    def __init__(self, exporter) -> None:
+        self.exporter = exporter
+
+    def export(self, spans):
+        return self.exporter.export(spans)
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self.exporter.force_flush(timeout_millis)
+
+    def shutdown(self) -> None:
+        # The caller decides when to shut it down.
+        pass
 
 
 _pricing_refresh_stop: Optional[threading.Event] = None

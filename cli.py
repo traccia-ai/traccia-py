@@ -8,7 +8,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Dict, Optional
 
 from traccia.config import (
     validate_config,
@@ -18,6 +18,45 @@ from traccia.config import (
     DEFAULT_OTLP_TRACE_ENDPOINT,
 )
 from traccia.errors import ConfigError
+
+
+_PROVIDER_ENV = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "groq": ("GROQ_API_KEY",),
+    "typesafe": ("TYPESAFE_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+    "cohere": ("COHERE_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+}
+
+
+def _provider_keys_from_env() -> Dict[str, str]:
+    """Map provider credentials from the environment. Values are never printed."""
+    keys: Dict[str, str] = {}
+    for provider, names in _PROVIDER_ENV.items():
+        for name in names:
+            value = (os.environ.get(name) or "").strip()
+            if value:
+                keys[provider] = value
+                break
+    raw = (os.environ.get("TRACCIA_PROVIDER_KEYS") or "").strip()
+    if not raw:
+        return keys
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("TRACCIA_PROVIDER_KEYS must be a JSON object of provider names to API keys") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("TRACCIA_PROVIDER_KEYS must be a JSON object of provider names to API keys")
+    for name, value in parsed.items():
+        text = str(value or "").strip()
+        provider = str(name or "").strip().lower()
+        if provider and text:
+            keys[provider] = text
+    return keys
 
 
 def _check(args) -> int:
@@ -527,8 +566,338 @@ def _pricing_clear(args) -> int:
     return 0
 
 
+def _resolve_scorer_ids(scorers) -> dict:
+    """Current platform ids, so a renamed scorer still finds its baseline row."""
+    from traccia.eval.builtins import BUILTIN_SCORERS
+    from traccia.eval.client import fetch_scorer
+    from traccia.eval.errors import EvaluateError
+
+    found = {}
+    for name in scorers or []:
+        text = str(name)
+        if text.startswith("local:") or text in BUILTIN_SCORERS:
+            continue
+        try:
+            remote = fetch_scorer(text)
+        except EvaluateError:
+            continue
+        if remote.get("id"):
+            found[text] = str(remote["id"])
+    return found
+
+
+def _load_baseline(args) -> dict:
+    """Fetch the baseline once, before any task runs."""
+    from traccia.eval.client import fetch_experiment
+    from traccia.eval.errors import EvaluateError
+    from traccia.prompts.client import fetch_prompt_runtime
+
+    experiment_id = args.baseline_experiment
+    panel_index = args.baseline_panel
+    prompt_version_id = None
+    if args.baseline_prompt:
+        try:
+            payload, _ = fetch_prompt_runtime(args.baseline_prompt, label="production")
+        except Exception:
+            return {"missing": True}
+        experiment_id = payload.get("evidence_experiment_id")
+        if not experiment_id:
+            return {"missing": True}
+        if panel_index is None and payload.get("evidence_panel_index") is not None:
+            panel_index = payload.get("evidence_panel_index")
+        prompt_version_id = payload.get("evidence_prompt_version_id")
+    try:
+        experiment = fetch_experiment(str(experiment_id))
+    except EvaluateError:
+        return {"missing": True}
+    context = experiment.get("run_context") or {}
+    panels = (experiment.get("aggregates") or {}).get("panels") or []
+    if panel_index is not None and int(panel_index) < 0:
+        return {"panel_required": True}
+    if len(panels) > 1 and panel_index is None:
+        return {"panel_required": True}
+    if panel_index is None:
+        panel_index = int(panels[0].get("panel_index", 0)) if panels else 0
+    panel = next(
+        (
+            item
+            for item in panels
+            if isinstance(item, dict) and int(item.get("panel_index", 0)) == int(panel_index)
+        ),
+        None,
+    )
+    if panels and panel is None:
+        return {"missing": True}
+    measured = {}
+    for item in context.get("panel_measurements") or []:
+        if isinstance(item, dict) and int(item.get("panel_index", 0)) == int(panel_index):
+            measured = item
+            break
+    if not measured and int(panel_index) == 0 and "panel_measurements" not in context:
+        measured = context
+    return {
+        "experiment_id": str(experiment.get("id") or experiment_id),
+        "panel_index": int(panel_index),
+        "prompt_version_id": str((panel or {}).get("prompt_version_id") or prompt_version_id or "") or None,
+        "dataset_fingerprint": context.get("dataset_fingerprint"),
+        "dataset_verified": context.get("dataset_verified") is True,
+        "scorer_evidence": context.get("scorer_evidence") or [],
+        "scorers": (panel or {}).get("scorers") or [],
+        "latency_concurrency": context.get("latency_concurrency"),
+        "mean_latency_ms": measured.get("mean_latency_ms"),
+        "task_cost_usd": measured.get("task_cost_usd"),
+        "task_cost_coverage": measured.get("task_cost_coverage"),
+        "judge_cost_usd": measured.get("judge_cost_usd"),
+        "judge_cost_coverage": measured.get("judge_cost_coverage"),
+        "judge_definition_hashes": measured.get("judge_definition_hashes") or [],
+    }
+
+
+_GENERIC_EVAL_SCRIPTS = frozenset({"task", "eval", "main", "index", "run"})
+
+
+def experiment_name(explicit, dataset, script, environ=None) -> str:
+    """Title shown on the experiment.
+
+    A file named task is not the title. The dataset is already shown beside
+    the name, so the title is "{subject} eval". Subject is a real script
+    name when the file has one, otherwise the dataset.
+    """
+    chosen = str(explicit or "").strip()
+    if chosen:
+        return chosen
+    env = os.environ if environ is None else environ
+    stem = os.path.splitext(os.path.basename(str(script)))[0]
+    subject = stem if stem.lower() not in _GENERIC_EVAL_SCRIPTS else str(dataset).strip()
+    label = f"{subject} eval"
+    ref = str(env.get("TRACCIA_GIT_HEAD_REF") or "").strip()
+    pr = str(env.get("TRACCIA_PR_NUMBER") or "").strip()
+    if ref:
+        return f"{label} · {ref}"
+    if pr:
+        return f"{label} · PR {pr}"
+    return label
+
+
+def _argv_output(argv) -> Optional[str]:
+    source = list(sys.argv[1:] if argv is None else argv)
+    if "--output" not in source:
+        return None
+    index = source.index("--output")
+    if index + 1 >= len(source) or str(source[index + 1]).startswith("-"):
+        return None
+    return str(source[index + 1])
+
+
+def _script_halted(path: str, exc: BaseException) -> int:
+    """A task script that exits the interpreter is a failed run, including exit 0."""
+    if isinstance(exc, KeyboardInterrupt):
+        return _eval_summary(path, 130, "task_error", "The eval was interrupted")
+    code = exc.code if isinstance(exc, SystemExit) else None
+    if code in (None, 0):
+        message = "The task script exited before the run finished"
+    else:
+        message = f"The task script exited with status {code}"
+    return _eval_summary(path, 3, "task_error", message)
+
+
+def _eval_summary(path: str, code: int, name: str, message: str) -> int:
+    from traccia.eval.gate import write_summary
+
+    body = {
+        "exit_code": code,
+        "code": name,
+        "failures": [{"code": name, "message": message}],
+        "quality_gate": False,
+        "label": "Failed",
+    }
+    if not write_summary(path, body):
+        return 5
+    print(message, file=sys.stderr)
+    return code
+
+
+def _eval(args) -> int:
+    """Run a customer task script and apply CI gates. The summary file is the contract."""
+    from traccia.eval.gate import apply_baseline, decide, preflight, report_from_rows, validate_baseline, write_summary
+
+    options = {
+        "scorers": list(args.scorer or []),
+        "informational": list(args.informational or []),
+        "min_pass_rate": args.min_pass_rate,
+        "max_drop": args.max_drop,
+        "baseline_prompt": args.baseline_prompt,
+        "baseline_experiment": args.baseline_experiment,
+        "max_latency_increase": args.max_latency_increase,
+        "max_task_cost_increase": args.max_task_cost_increase,
+        "max_judge_cost_increase": args.max_judge_cost_increase,
+        "unhashed_scorers": [
+            str(name).split(":", 1)[1]
+            for name in (args.scorer or [])
+            if str(name).startswith("local:")
+        ],
+    }
+    early = preflight(options)
+    if early:
+        body = {**early, "label": "Failed"}
+        if not write_summary(args.output, body):
+            return 5
+        print(early["failures"][0]["message"], file=sys.stderr)
+        return int(early["exit_code"])
+
+    baseline = None
+    if args.baseline_prompt or args.baseline_experiment:
+        baseline = _load_baseline(args)
+        if args.max_drop is not None:
+            options["scorer_ids"] = _resolve_scorer_ids(args.scorer or [])
+        blocked = validate_baseline(baseline, options)
+        if blocked:
+            body = {**blocked, "label": "Failed"}
+            if not write_summary(args.output, body):
+                return 5
+            print(blocked["failures"][0]["message"], file=sys.stderr)
+            return int(blocked["exit_code"])
+
+    import importlib.util
+
+    try:
+        spec = importlib.util.spec_from_file_location("traccia_eval_task", args.script)
+        if spec is None or spec.loader is None:
+            raise FileNotFoundError(args.script)
+        module = importlib.util.module_from_spec(spec)
+        # Dataclasses with postponed annotations look the module up in sys.modules
+        # while the class body is still executing.
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(spec.name, None)
+            raise
+    except (SystemExit, KeyboardInterrupt) as exc:
+        return _script_halted(args.output, exc)
+    except Exception as exc:  # noqa: BLE001
+        return _eval_summary(args.output, 2, "bad_flags", f"Could not load the task script: {exc}")
+    task = getattr(module, "task", None)
+    local = getattr(module, "scorers", {}) or {}
+    from traccia.eval.evaluate import bind_scorer_name
+
+    scorers = []
+    for name in args.scorer:
+        if str(name).startswith("local:"):
+            key = str(name).split(":", 1)[1]
+            fn = local.get(key)
+            if fn is None:
+                body = {
+                    "exit_code": 2,
+                    "code": "unknown_scorer",
+                    "failures": [{"code": "unknown_scorer", "message": f"Unknown local scorer {key}"}],
+                    "quality_gate": False,
+                    "label": "Failed",
+                }
+                if not write_summary(args.output, body):
+                    return 5
+                return 2
+            scorers.append(bind_scorer_name(fn, key))
+        else:
+            scorers.append(name)
+
+    from traccia.eval import evaluate
+    from traccia.eval.errors import EvaluateError
+
+    try:
+        provider_keys = _provider_keys_from_env()
+    except ValueError as exc:
+        return _eval_summary(args.output, 2, "bad_flags", str(exc))
+
+    run_context = {
+        "checkout_sha": os.environ.get("TRACCIA_GIT_CHECKOUT_SHA"),
+        "github_sha": os.environ.get("TRACCIA_GIT_GITHUB_SHA"),
+        "head_sha": os.environ.get("TRACCIA_GIT_HEAD_SHA"),
+        "head_ref": os.environ.get("TRACCIA_GIT_HEAD_REF"),
+        "base_ref": os.environ.get("TRACCIA_GIT_BASE_REF"),
+        "pr": os.environ.get("TRACCIA_PR_NUMBER"),
+        "repository": os.environ.get("TRACCIA_GIT_REPOSITORY"),
+        "actor": os.environ.get("TRACCIA_GIT_ACTOR"),
+        "gate_policy": {
+            "min_pass_rate": args.min_pass_rate,
+            "max_drop": args.max_drop,
+            "max_latency_increase": args.max_latency_increase,
+            "max_task_cost_increase": args.max_task_cost_increase,
+            "max_judge_cost_increase": args.max_judge_cost_increase,
+        },
+        "metric_semantics": {
+            "max_drop": "percentage_points",
+            "latency": "task_wall_per_item",
+            "cost": "relative",
+        },
+    }
+    if baseline:
+        run_context["baseline_experiment_id"] = baseline.get("experiment_id")
+        run_context["baseline_panel_index"] = baseline.get("panel_index")
+        run_context["baseline_prompt_version_id"] = baseline.get("prompt_version_id")
+    if (args.prompt_version is not None or args.prompt_label) and not args.prompt:
+        return _eval_summary(args.output, 2, "bad_flags", "A prompt version needs a prompt name")
+    if args.prompt and args.prompt_version is None and not str(args.prompt_label or "").strip():
+        return _eval_summary(args.output, 2, "bad_flags", "Pass a prompt version or label")
+    try:
+        result = evaluate(
+            experiment_name(args.name, args.dataset, args.script),
+            data=args.dataset,
+            task=task,
+            scorers=scorers,
+            prompt=args.prompt,
+            prompt_version=args.prompt_version,
+            prompt_label=args.prompt_label,
+            progress=True,
+            provider_keys=provider_keys,
+            run_context=run_context,
+        )
+    except (SystemExit, KeyboardInterrupt) as exc:
+        return _script_halted(args.output, exc)
+    except EvaluateError as exc:
+        return _eval_summary(args.output, 2, "bad_flags", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _eval_summary(args.output, 3, "task_error", str(exc))
+    stored = result.run_context or {}
+    report = {
+        "rows": result.rows,
+        "persist_error": result.persist_error,
+        "dataset_drift": bool(stored.get("dataset_drift")),
+        "dataset_verified": stored.get("dataset_verified"),
+        "dataset_fingerprint": stored.get("dataset_fingerprint"),
+        "experiment_id": result.experiment_id,
+        "url": result.url,
+        "latency_concurrency": stored.get("latency_concurrency"),
+        "task_errors": 1 if result.errors else 0,
+        "scorers": report_from_rows(
+            result.rows,
+            informational=list(args.informational or []),
+            item_ids=[row.get("item_id") for row in result.rows or []],
+            scorers=list(args.scorer or []),
+        ),
+        "min_pass_rate": args.min_pass_rate,
+        "max_drop": args.max_drop,
+        "allow_dataset_change": args.allow_dataset_change,
+        "allow_concurrency_mismatch": args.allow_concurrency_mismatch,
+        "max_latency_increase": args.max_latency_increase,
+        "max_task_cost_increase": args.max_task_cost_increase,
+        "max_judge_cost_increase": args.max_judge_cost_increase,
+        "baseline_experiment_id": (baseline or {}).get("experiment_id"),
+    }
+    apply_baseline(report, baseline)
+    outcome = decide(report)
+    if not write_summary(args.output, outcome):
+        return 5
+    print(outcome.get("label") or outcome.get("code"), file=sys.stderr)
+    return int(outcome["exit_code"])
+
+
 def main(argv=None) -> int:
     """Main CLI entry point."""
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
     parser = argparse.ArgumentParser(
         prog="traccia",
         description="Traccia SDK - Production-ready tracing for AI agents",
@@ -635,8 +1004,58 @@ For more information, visit: https://github.com/traccia-ai/traccia
     )
     pricing_clear_cmd.set_defaults(func=_pricing_clear)
 
-    args = parser.parse_args(argv)
-    return args.func(args)
+    eval_cmd = sub.add_parser(
+        "eval",
+        help="Run an experiment and fail the process when a gate misses",
+    )
+    eval_cmd.add_argument("script", help="Python file that exports task(input)")
+    eval_cmd.add_argument("--output", required=True, help="Summary JSON path")
+    eval_cmd.add_argument("--dataset", required=True)
+    eval_cmd.add_argument(
+        "--name",
+        default=None,
+        help="Experiment title. Defaults to the script or dataset name followed by eval.",
+    )
+    eval_cmd.add_argument("--scorer", action="append", default=[])
+    eval_cmd.add_argument("--informational", action="append", default=[])
+    eval_cmd.add_argument("--min-pass-rate", type=float, default=None)
+    eval_cmd.add_argument("--max-drop", type=float, default=None)
+    eval_cmd.add_argument("--baseline-prompt", default=None)
+    eval_cmd.add_argument("--baseline-experiment", default=None)
+    eval_cmd.add_argument("--baseline-panel", type=int, default=None)
+    eval_cmd.add_argument("--allow-dataset-change", action="store_true")
+    eval_cmd.add_argument("--allow-concurrency-mismatch", action="store_true")
+    eval_cmd.add_argument("--max-latency-increase", type=float, default=None)
+    eval_cmd.add_argument("--max-task-cost-increase", type=float, default=None)
+    eval_cmd.add_argument("--max-judge-cost-increase", type=float, default=None)
+    eval_cmd.add_argument("--prompt", default=None, help="Prompt name to attach as promotion evidence")
+    eval_cmd.add_argument("--prompt-version", type=int, default=None, help="Prompt version number")
+    eval_cmd.add_argument("--prompt-label", default=None, help="Prompt label, such as production")
+    eval_cmd.set_defaults(func=_eval)
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            return 0
+        code = int(exc.code) if isinstance(exc.code, int) else 2
+        output = _argv_output(argv)
+        if output:
+            return _eval_summary(output, 2, "bad_flags", "The command could not be parsed")
+        return code
+    try:
+        return int(args.func(args))
+    except Exception as exc:
+        from traccia.prompts.client import PromptFetchError
+
+        output = getattr(args, "output", None)
+        config = isinstance(exc, PromptFetchError)
+        code = 2 if config else 3
+        name = "bad_flags" if config else "task_error"
+        if output:
+            return _eval_summary(output, code, name, str(exc))
+        print(str(exc), file=sys.stderr)
+        return code
 
 
 if __name__ == "__main__":

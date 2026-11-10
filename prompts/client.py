@@ -8,7 +8,8 @@ from urllib.parse import urlencode, urlparse
 
 import requests
 
-from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT, load_config
+from traccia import client_config
+from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT
 
 logger = logging.getLogger("traccia.prompts")
 
@@ -30,15 +31,14 @@ def resolve_credentials(
     endpoint: Optional[str] = None,
     prompt_api_base: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """Return (api_key, base_url) from args, env, or SDK config.
+    """Return (api_key, base_url) from args, init(), env, or SDK config.
 
     Prefer prompt_api_base / TRACCIA_PROMPT_API_BASE when set; otherwise derive from the traces endpoint.
     """
     import os
 
-    cfg = load_config()
-    key = api_key or (cfg.tracing.api_key if cfg and cfg.tracing else None)
-    traces = endpoint or (cfg.tracing.endpoint if cfg and cfg.tracing else None) or DEFAULT_OTLP_TRACE_ENDPOINT
+    key, traces = client_config.resolve_credentials(api_key=api_key, endpoint=endpoint)
+    traces = traces or DEFAULT_OTLP_TRACE_ENDPOINT
     if not key:
         raise PromptFetchError(
             "Traccia API key not found. Call init(api_key=...) or set TRACCIA_API_KEY before load_prompt."

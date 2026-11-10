@@ -9,15 +9,16 @@ from traccia.tracer.span import SpanStatus
 _patched = False
 
 
-def _compute_cost(model, prompt_tokens, completion_tokens):
-    """Compute cost from token usage using pricing config."""
+def _compute_cost(model, prompt_tokens, completion_tokens, vendor="google_gemini"):
+    """Cost of one call, priced like its span: with the vendor it sets as llm.vendor, from the
+    shared resolver's table (which includes pricing overrides)."""
     if not model or prompt_tokens is None or completion_tokens is None:
         return None
     try:
-        from traccia.pricing_config import load_pricing
+        from traccia.cost_resolver import get_resolver
         from traccia.processors.cost_engine import compute_cost as _compute
 
-        return _compute(model, prompt_tokens, completion_tokens, load_pricing())
+        return _compute(model, prompt_tokens, completion_tokens, get_resolver().pricing_table, vendor=vendor)
     except Exception:
         return None
 
@@ -233,7 +234,7 @@ def _build_sync_wrapper(original_create):
             try:
                 from traccia.governance.pep import enforce_llm_call, finish_llm_call
 
-                decision = enforce_llm_call(kwargs)
+                decision = enforce_llm_call(kwargs, vendor=attributes.get("llm.vendor"))
                 resp = original_create(self, *args, **kwargs)
                 if not streaming:
                     _populate_span(span, resp, model, t0)
@@ -285,23 +286,32 @@ def _build_async_wrapper(original_create):
             "llm.gemini.interaction", attributes=attributes
         ) as span:
             decision = None
+            target = None
             try:
-                from traccia.governance.pep import enforce_llm_call, finish_llm_call
+                from traccia.governance.pep import (
+                    enforce_llm_call_off_loop,
+                    finish_llm_call_in_background,
+                )
 
-                decision = enforce_llm_call(kwargs)
+                # Off the event loop, so a slow policy server delays no other task.
+                decision, target = await enforce_llm_call_off_loop(
+                    kwargs, vendor=attributes.get("llm.vendor")
+                )
                 resp = await original_create(self, *args, **kwargs)
-                if not streaming: 
+                if not streaming:
                     _populate_span(span, resp, model, t0)
-                finish_llm_call(decision)
+                finish_llm_call_in_background(decision, target=target)
                 return resp
-            except Exception as exc:
+            except BaseException as exc:
+                # BaseException too: a cancelled call (asyncio.CancelledError, a wait_for()
+                # timeout) releases its reservation instead of holding it until it expires.
                 try:
-                    from traccia.governance.pep import finish_llm_call as _finish
-                    _finish(decision, release=True)
+                    from traccia.governance.pep import finish_llm_call_in_background as _finish
+                    _finish(decision, target=target, release=True)
                 except Exception:
                     pass
                 span.record_exception(exc)
-                span.set_status(SpanStatus.ERROR, str(exc))
+                span.set_status(SpanStatus.ERROR, str(exc) or type(exc).__name__)
                 _record_exception_metric(model)
                 raise
 

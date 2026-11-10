@@ -1,0 +1,144 @@
+[
+  {
+    "name": "execution_only",
+    "report": {"rows": [{"item_id": "a"}], "scorers": [], "task_errors": 0},
+    "exit_code": 0,
+    "quality_gate": false,
+    "code": null
+  },
+  {
+    "name": "task_error_without_scorers",
+    "report": {"rows": [{"item_id": "a"}], "scorers": [], "task_errors": 1},
+    "exit_code": 3,
+    "code": "task_error"
+  },
+  {
+    "name": "threshold_miss",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "min_pass_rate": 0.9,
+      "dataset_verified": true,
+      "scorers": [{"name": "exact_match", "pass_rate": 0.5, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 1,
+    "code": "threshold_missed"
+  },
+  {
+    "name": "regression_points",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "max_drop": 0.05,
+      "dataset_verified": true,
+      "scorers": [{"name": "exact_match", "pass_rate": 0.84, "baseline_pass_rate": 0.9, "definition_hash": "sha256:same", "baseline_definition_hash": "sha256:same", "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 1,
+    "code": "regression"
+  },
+  {
+    "name": "drop_within_points",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "max_drop": 0.05,
+      "dataset_verified": true,
+      "scorers": [{"name": "exact_match", "pass_rate": 0.85, "baseline_pass_rate": 0.9, "definition_hash": "sha256:same", "baseline_definition_hash": "sha256:same", "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 0,
+    "quality_gate": true
+  },
+  {
+    "name": "dataset_changed",
+    "report": {"rows": [{"item_id": "a"}], "dataset_changed": true, "dataset_verified": true, "max_drop": 0.05, "scorers": [{"name": "exact_match", "pass_rate": 1, "baseline_pass_rate": 1, "definition_hash": "sha256:same", "baseline_definition_hash": "sha256:same", "expected": 1, "completed": 1, "missing": 0, "errored": 0}]},
+    "exit_code": 1,
+    "code": "dataset_changed"
+  },
+  {
+    "name": "persist_before_quality",
+    "report": {"rows": [{"item_id": "a"}], "persist_error": "upload failed", "min_pass_rate": 0.9, "scorers": [{"name": "exact_match", "pass_rate": 0, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]},
+    "exit_code": 4,
+    "code": "persist_failed"
+  },
+  {
+    "name": "summary_before_persist",
+    "report": {"summary_failed": true, "persist_error": "upload failed", "rows": [{"item_id": "a"}]},
+    "exit_code": 5,
+    "code": "summary_failed"
+  },
+  {
+    "name": "informational_outage",
+    "report": {"rows": [{"item_id": "a"}], "scorers": [{"name": "tone", "informational": true, "errored": 1, "missing": 0, "expected": 1, "completed": 0}]},
+    "exit_code": 3,
+    "code": "scorer_error"
+  },
+  {
+    "name": "judge_workload_mismatch",
+    "report": {"rows": [{"item_id": "a"}], "judge_workload_mismatch": true, "max_judge_cost_increase": 0.2, "scorers": []},
+    "exit_code": 3,
+    "code": "judge_workload_mismatch"
+  },
+  {
+    "name": "source_fallback_cannot_regress",
+    "report": {"rows": [{"item_id": "a"}], "max_drop": 0.05, "scorers": [{"name": "tone", "definition_identity": "source_fallback", "pass_rate": 1, "baseline_pass_rate": 1, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]},
+    "exit_code": 3,
+    "code": "scorer_definition_unhashed"
+  },
+  {
+    "name": "cost_incomplete",
+    "report": {"rows": [{"item_id": "a"}], "cost_gate": true, "cost_coverage": "unknown", "max_task_cost_increase": 0.2, "scorers": []},
+    "exit_code": 3,
+    "code": "cost_incomplete"
+  },
+  {
+    "name": "unverified_dataset_cannot_pass_a_quality_gate",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "dataset_verified": false,
+      "min_pass_rate": 0.9,
+      "scorers": [{"name": "exact_match", "pass_rate": 1, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 3,
+    "code": "dataset_unverified"
+  },
+  {
+    "name": "max_drop_without_baseline_rate",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "max_drop": 0.05,
+      "dataset_verified": true,
+      "scorers": [{"name": "exact_match", "pass_rate": 1, "definition_hash": "sha256:same", "baseline_definition_hash": "sha256:same", "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 3,
+    "code": "baseline_missing"
+  },
+  {
+    "name": "unhashed_max_drop",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "max_drop": 0.05,
+      "scorers": [{"name": "exact_match", "pass_rate": 1, "baseline_pass_rate": 1, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 3,
+    "quality_gate": false,
+    "code": "scorer_definition_unhashed"
+  },
+  {
+    "name": "informational_only_is_execution_only",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "min_pass_rate": 0.9,
+      "dataset_verified": true,
+      "scorers": [{"name": "tone", "informational": true, "pass_rate": 1, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 0,
+    "quality_gate": false
+  },
+  {
+    "name": "missing_dataset_verification_cannot_pass",
+    "report": {
+      "rows": [{"item_id": "a"}],
+      "min_pass_rate": 0.9,
+      "scorers": [{"name": "exact_match", "pass_rate": 1, "expected": 1, "completed": 1, "missing": 0, "errored": 0}]
+    },
+    "exit_code": 3,
+    "code": "dataset_unverified"
+  }
+]

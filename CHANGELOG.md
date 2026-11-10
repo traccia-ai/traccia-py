@@ -6,6 +6,88 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read to the end, closed, or garbage collected. Read to the end, it records the full completion, token usage, and cost
+- A streamed call settles for the agent that made it, even if the stream is read under another `run_identity` or after it exits. Cancellation (`asyncio.CancelledError`) and `KeyboardInterrupt` end the span with an error; the governance reservation is released if nothing was received yet, otherwise an estimate of what was received is charged
+- A stream that fails or is cancelled keeps the text received so far on its span. A stream dropped without being finished is finalized (span ended, request aborted, settled) on a background thread, never inside garbage collection, which can run while the thread holds a lock that finalizing needs, such as the HTTP connection pool's
+- A Groq stream dropped without being finished or closed has its request aborted, so Groq stops generating it, and is charged its reservation unless Groq reported usage. A stream stopped with `break` and then closed still settles an estimate of what was streamed
+- A Groq call settled from an estimate (no usage reported) is priced locally like reported usage, so a pricing override applies to it
+- A Groq call with output but no reported usage (a stream stopped, closed, or failed partway, or a response without usage) records the estimated token counts it is charged on its span, with `llm.usage.source` set to `estimated`, so the span's cost matches the charge. Reasoning and tool call arguments count as output. A stream dropped unfinished or still open at shutdown is charged its reservation, but its span records the same estimate of what it produced
+- `stop_tracing()` and interpreter exit end and settle Groq calls still in flight (open streams, requests not yet returned): charged their reported usage, or their reservation when it is unknown, within the `stop_tracing(flush_timeout=...)` limit (10 seconds by default). Their spans end with `llm.interrupted` set to `shutdown`. A call the Spend Cap reserved budget for is also stopped (its stream's request aborted), which bounds what Groq bills against the reservation; a call with nothing reserved is left running for whoever reads it, and is stopped if its stream is dropped later. The same applies to a stream returned afterwards by a request that was still in flight. This work runs on its own thread, so `stop_tracing()` called from a signal handler that interrupted an HTTP request does not deadlock. An async stream is stopped on its event loop, also when `stop_tracing()` runs on another thread. A call still in its policy check is settled once the check returns: `stop_tracing()` waits for it within the limit, and a check that returns later settles the reservation it made then
+- A Groq call settles with the API key, endpoint, and agent of its policy check, so a settle that runs after `stop_tracing()` (a stream read later, or a settle still in the background) is not skipped
+- Calls made through `with_raw_response` are traced, also with `stream=True`: the stream returned by `.parse()` records the completion and token usage. A call made through `with_streaming_response`, whose body you read yourself, ends its span when the call returns and is charged its reservation
+- `BatchSpanProcessor` takes `shutdown_timeout_millis` (default 30000), and `shutdown(timeout=...)` (seconds) overrides it for one call. `shutdown()` waits that long for exports and for the exporter's own `shutdown()`, which runs on the worker after the final export, and returns by then even if one of them blocks. If an export is still running, the exporter is not closed under it: the worker exports the rest of the queue, then closes it. If the time runs out between exports, the rest of the queue is dropped (and logged) and the exporter is closed. An exporter `shutdown()` still running at the deadline finishes in the background. `shutdown()` called from inside an export (an exporter stopping tracing) closes the exporter once that export returns, and a `shutdown()` that finds shutdown already under way waits for it too, up to the same deadline. So does the exit hook, even after such a `stop_tracing()`
+- Enrichment processors can implement `on_ended(span)`, called by `Span.end()` after the span is ended. A processor that wraps `BatchSpanProcessor` and forwards only `on_end()` still works: its spans are queued by the next flush
+
+### Changed
+- `stop_tracing()` leaves an exporter passed to `start_tracing(exporter=...)` open; shutting it down is up to the caller. `stop_tracing()` exports what is queued as part of shutting the batch processor down, bounded by `flush_timeout` when it is given (otherwise by the processor's shutdown timeout)
+
+### Fixed
+- Spans exported through the console or file exporter (`BatchSpanProcessor`) are no longer lost when the queue is flushed while they are still ending. At shutdown, the final export also waits, up to the shutdown timeout, for spans whose `end()` had reached the batch processor when shutdown started. A span that reaches it later, even one whose `end()` was still in an earlier processor, is not exported
+- `stop_tracing()` shuts down the exporters the SDK created, after their last export, and never exports from two threads at once
+- `stop_tracing()` no longer raises `TypeError` with `max_spans_per_second` set, and `force_flush()` reaches the batch processor behind the rate limiter
+- `BatchSpanProcessor` keeps exporting on schedule after an export raises a `BaseException` such as `asyncio.CancelledError`; before, its worker thread stopped
+- `BatchSpanProcessor` works in a process forked after `start_tracing()`: the child exports its own spans on schedule, on `force_flush()` and at shutdown. Starting, ending and exporting spans in the child does not hang when the fork lands while another thread holds a lock they take (the batch processor's, the rate limiter's, the file exporter's, the guardrail detector's, the tracer provider's, or the policy evidence store's). Spans queued before the fork are exported by the parent only
+
+### Fixed
+- A policy `clamp_max_tokens` now sets the token cap the provider API takes: `max_output_tokens` for OpenAI Responses and in Gemini's `generation_config`, `max_completion_tokens` or `max_tokens` (whichever the request used) for OpenAI Chat, `max_tokens` for Anthropic. It used to always add `max_tokens`, which Responses and Gemini reject and which left an existing cap untouched. The policy check also sees that cap. Chat requests without a cap get `max_completion_tokens`, since OpenAI reasoning models reject `max_tokens`. A parameter passed as OpenAI's `NOT_GIVEN` or `omit` (as `chat.completions.stream()` does) counts as not set. A Gemini call made with `request=` is checked with that request's model and cap, and a reshape is applied to a copy of the request; if the request cannot be reshaped (an agent interaction, or an unknown request type), the call is blocked
+
+## [0.1.34] - 2026-11-03
+
+### Changed
+- **Policy checks block by default when Traccia gives no answer** (TRC-342). A `@govern` status check or policy check that times out, fails to connect, gets a 5xx or gets an invalid answer now follows your policy fail mode from Traccia (**Settings → Policy Enforcement**, organization or workspace), and blocks when none is set. Before, it allowed the call unless `fail_open=False`. To keep calls running during an outage, choose Allow in that setting, or pass `init(policy_fail_mode="open")`
+- The setting arrives with the agent-status answer at the start of each run and with each policy check, with no extra requests. It is kept for 10 minutes after the last answer that carried it. A newer setting wins over an older, slower answer; an answer without the fields keeps the current setting
+- A 401/403 from Traccia raises `AgentBlockedError` (`invalid_api_key` / `permission_denied`) whatever the fail mode, and refuses checks already on their way
+- A missing API key, endpoint or agent ID under `@govern` or `check_policy()` raises `GovernanceConfigError` (a subclass of `AgentBlockedError`) instead of allowing the call
+- A decision without a valid `effect` and boolean `would_have` counts as no answer
+- The agent-status cache is keyed by API key, endpoint and agent, so two keys or endpoints with the same agent ID never share a status
+- An agent-status answer without a known status (`allowed`, `soft_block`, `hard_block`) counts as no answer. Before, a missing or unknown status was treated as allowed
+- After a 401/403 for a key, its cached agent statuses (for every agent) are not reused: the next run asks Traccia again
+- Calling `init()` again forgets the remembered fail mode and applies that call's override, but keeps any 401/403 rejection, so a check sent before the rejection stays refused. Tracing is not re-initialized
+- No more prefix matching: a model name that matches no pricing key after the steps above (for example a fine-tuned `gpt-4o-mini-ft-…`) gets no cost instead of the price of a model whose name it starts with
+
+### Deprecated
+- `@govern(fail_open=...)`. `True` means `policy_fail_mode="open"` and `False` means `"closed"`, for that run. Omit it to follow your Traccia setting. Passing both with different values raises `ValueError`
+
+### Added
+- `init(policy_fail_mode="open" | "closed")` and `@govern(policy_fail_mode=...)`: a local override used only when Traccia gives no answer. It never overrides a rejected key, a block, a deny or a configuration error. `policy_fail_mode` in `[governance]` of `traccia.toml` works too
+- `traccia.pricing_matcher.match_model()` picks the pricing key for a model name. Names match on their base name, without the provider path (`groq/openai/gpt-oss-120b`, `models/gemini-2.5-flash`), a Bedrock region (`us.`), or a date or `-latest` suffix. When several providers list the model, the span's `llm.vendor` price wins (its key for the exact dated version first: `azure/o1-mini-2024-09-12` over `azure/o1-mini`), then the shortest key. The platform uses an identical copy, so local and platform costs agree
+- Spans record `llm.pricing.match_kind` (`exact` or `base`) and `llm.pricing.provider` next to `llm.pricing.model_key`
+- `compute_cost()`, `compute_cost_detail()`, and `match_pricing_model_key()` take an optional `vendor`
+- `PriceMatch.ambiguous` is true when the vendor did not settle which of several providers' keys was used
+- `enforce_llm_call()` takes an optional `vendor` and sends it with the policy check, so Spend Cap uses that provider's price. The OpenAI, Anthropic and Gemini integrations pass it
+
+### Fixed
+- Synchronous OpenAI chat traces record the completion text and native finish reasons again, including provider content-filter detection
+- The API key and endpoint passed to `init()` are now used by policy checks, `@govern` status checks, prompts and evals, not only by tracing. Before, policy checks were skipped with `missing_credentials` and `load_prompt` raised `PromptFetchError` unless the key was also in the environment or a config file. Arguments passed to a single call still take priority
+- With an API key but no endpoint, policy checks now go to the default endpoint that traces use, instead of being skipped
+- Model ids with an organisation prefix (`openai/gpt-oss-120b`, `qwen/qwen3-32b` on Groq) get a cost. They previously matched no pricing key
+- A model listed by several providers is priced at the calling provider's rate. `gpt-oss-120b` on a Groq span took `azure_ai/gpt-oss-120b` and now takes `groq/openai/gpt-oss-120b`
+- Gemini calls (`llm.vendor` `google_gemini`) are priced at the Gemini API rate instead of Vertex AI's. A vendor matches its pricing provider family (`bedrock` also covers `bedrock_converse`), with aliases where the names differ (`google_gemini` is `gemini`)
+- A dated model name uses its own dated price when the pricing table has one
+- `sample_rate` now controls which traces are exported (TRC-276). Before, it had no effect and every trace was exported. Children follow their parent's decision, including a remote W3C parent, and unsampled spans are never exported
+- Freshness Guard evidence (recent reads and retrievals sent with policy checks) belongs to one run: one top-level `@govern` call, with nested calls joining it (TRC-289). Two runs under the same parent trace, or two agents or keys, no longer share it, so a write cannot look fresh because of another run's read
+- The `traccia` CLI no longer crashes on Windows consoles that are not UTF-8
+
+## [0.1.33] - 2026-10-21
+
+### Added
+- `traccia eval SCRIPT --output PATH --dataset NAME` runs a task script, saves an experiment, and writes `summary.json`. Exit 0 with no pass-rate bar is Execution Only (`quality_gate` false). `--min-pass-rate` or `--max-drop` makes a Quality Gate. `--max-drop 0.05` is five percentage points. `--max-task-cost-increase`, `--max-judge-cost-increase`, and `--max-latency-increase` are relative: `0.2` is 20 percent. Evidence failures exit 3 before a low score is considered. Exit 2 is a bad command or baseline, 4 is a failed save, 5 is a summary file that could not be written.
+- `local:` scorers have no definition hash, so `--max-drop` ends in `scorer_definition_unhashed` instead of a green quality gate. A renamed platform scorer still matches its baseline by scorer id. A scorer selected by id is grouped under the name on its result.
+- Each Jev question is its own gate, named `{scorer}:{question}`.
+- `traccia eval` sends provider API keys from the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `GROQ_API_KEY`, `TYPESAFE_API_KEY`, or `TRACCIA_PROVIDER_KEYS`) and does not write them into the summary. A task file that uses a dataclass with postponed annotations loads.
+- Task cost includes OpenTelemetry attribute mappings and priced provider child spans on the SDK tracer provider.
+- `create_experiment` retries a 5xx. The client-generated experiment id makes the retry safe.
+- `evaluate()` keeps scorer `status`. An execution error stays `status: error` with no score, including remote platform scorers. Task cost is separate from judge cost.
+
+### Changed
+- Development status on PyPI is Production/Stable.
+- Passing `prompt` without `prompt_version` or `prompt_label` still attaches the production label and writes a deprecation warning. The next SDK release removes that default. `traccia eval` does not use that default: pass `--prompt` with `--prompt-version` or `--prompt-label`.
+
+### Fixed
+- With `redact_pii=True`, span events, exceptions, arrays, and nested values are redacted before export. A nested value inherits its parent key, so `{"result": {"answer": ...}}` is redacted in the default mode. `redact_all_strings` is honored, and error status text is scrubbed.
+- Span logging runs after redaction, so `enable_span_logging=True` does not print the original values.
+
 ## [0.1.32] - 2026-10-08
 
 ### Added
