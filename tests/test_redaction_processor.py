@@ -241,3 +241,49 @@ def test_init_span_logging_runs_after_redaction():
         assert redact_idx < log_idx
     finally:
         stop_tracing()
+
+
+def test_redact_attributes_scrubs_guardrail_finding_excerpts():
+    """A finding's raw_excerpt copies span text, so it is scrubbed like that text (TRC-282)."""
+    import json
+
+    findings = [
+        {
+            "name": "provider_refusal",
+            "detection_reason": "llm_response_status_with_refusal_text",
+            "evidence_ref": {"attribute_keys": ["llm.response.status", "llm.completion"]},
+            "raw_excerpt": "I can't help with that, jane@example.com",
+        },
+        {"name": "provider_content_filter", "raw_excerpt": "content_filter"},
+    ]
+    out = redact_attributes({"guardrail.findings": json.dumps(findings)})
+    scrubbed = json.loads(out["guardrail.findings"])
+    assert scrubbed[0]["raw_excerpt"] == "I can't help with that, [REDACTED_EMAIL]"
+    # Everything else in the finding is kept as written.
+    assert scrubbed[0]["evidence_ref"] == findings[0]["evidence_ref"]
+    assert scrubbed[1] == findings[1]
+
+
+def test_redact_attributes_keeps_guardrail_json_without_pii_byte_identical():
+    import json
+
+    summary = json.dumps({"detected_categories": ["moderation"], "limitations": []})
+    findings = json.dumps([{"name": "x", "raw_excerpt": "nothing sensitive"}])
+    out = redact_attributes({"guardrail.summary": summary, "guardrail.findings": findings})
+    assert out["guardrail.summary"] == summary
+    assert out["guardrail.findings"] == findings
+
+
+def test_redact_attributes_guardrail_value_that_is_not_json_is_redacted_as_text():
+    out = redact_attributes({"guardrail.findings": "raw jane@example.com"})
+    assert out["guardrail.findings"] == "raw [REDACTED_EMAIL]"
+
+
+def test_redaction_processor_scrubs_guardrail_findings_on_span():
+    import json
+
+    span = _FakeSpan(
+        {"guardrail.findings": json.dumps([{"name": "x", "raw_excerpt": "SSN 123-45-6789"}])}
+    )
+    RedactionSpanProcessor().on_end(span)
+    assert json.loads(span.attributes["guardrail.findings"])[0]["raw_excerpt"] == "SSN [REDACTED_SSN]"
