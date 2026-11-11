@@ -113,10 +113,22 @@ def _field(obj: Any, name: str) -> Any:
     return getattr(obj, name, None)
 
 
-# Responses output items that hand control back to the caller to run a tool, the
-# counterpart of a Chat Completions ``finish_reason`` of "tool_calls". Built-in tool items
-# (web_search_call, file_search_call, ...) run on OpenAI's side and do not end the turn.
-_RESPONSES_CLIENT_TOOL_ITEMS = frozenset({"function_call", "custom_tool_call"})
+# Responses output items that hand control back to the caller, the counterpart of a Chat
+# Completions ``finish_reason`` of "tool_calls": tools the caller runs (function, custom,
+# computer use, local shell, shell, apply_patch) and an MCP call awaiting the caller's
+# approval. Hosted tool items (web_search_call, file_search_call, code_interpreter_call,
+# image_generation_call, mcp_call, ...) run on OpenAI's side and do not end the turn.
+_RESPONSES_CLIENT_TOOL_ITEMS = frozenset(
+    {
+        "function_call",
+        "custom_tool_call",
+        "computer_call",
+        "local_shell_call",
+        "shell_call",
+        "apply_patch_call",
+        "mcp_approval_request",
+    }
+)
 
 # ``incomplete_details.reason`` mapped to the Chat Completions finish_reason vocabulary,
 # so ``llm.finish_reason`` means the same thing for both OpenAI APIs.

@@ -210,6 +210,103 @@ def test_responses_completion_and_finish_reason(
     assert attributes["llm.usage.total_tokens"] == 17
 
 
+_CLIENT_TOOL_ITEMS = {
+    "function_call": _FUNCTION_CALL,
+    "custom_tool_call": {
+        "type": "custom_tool_call", "id": "ct_1", "call_id": "call_ct", "name": "grammar", "input": "x",
+    },
+    "computer_call": {
+        "type": "computer_call", "id": "cu_1", "call_id": "call_cu", "status": "completed",
+        "action": {"type": "click", "button": "left", "x": 1, "y": 2}, "pending_safety_checks": [],
+    },
+    "local_shell_call": {
+        "type": "local_shell_call", "id": "ls_1", "call_id": "call_ls", "status": "completed",
+        "action": {"type": "exec", "command": ["ls"], "env": {}},
+    },
+    "shell_call": {
+        "type": "shell_call", "id": "sh_1", "call_id": "call_sh", "status": "completed",
+        "action": {"commands": ["ls"], "timeout_ms": None, "max_output_length": None},
+    },
+    "apply_patch_call": {
+        "type": "apply_patch_call", "id": "ap_1", "call_id": "call_ap", "status": "completed",
+        "operation": {"type": "create_file", "path": "a.txt", "diff": "+a"},
+    },
+    "mcp_approval_request": {
+        "type": "mcp_approval_request", "id": "mr_1", "name": "lookup", "arguments": "{}", "server_label": "srv",
+    },
+}
+
+_HOSTED_TOOL_ITEMS = {
+    "web_search_call": _WEB_SEARCH,
+    "file_search_call": {"type": "file_search_call", "id": "fs_1", "queries": ["q"], "status": "completed"},
+    "code_interpreter_call": {
+        "type": "code_interpreter_call", "id": "ci_1", "code": "1", "container_id": "c", "outputs": [],
+        "status": "completed",
+    },
+    "image_generation_call": {"type": "image_generation_call", "id": "ig_1", "result": None, "status": "completed"},
+    "mcp_call": {"type": "mcp_call", "id": "mc_1", "name": "lookup", "arguments": "{}", "server_label": "srv"},
+}
+
+
+@pytest.mark.parametrize("item_type", sorted(_CLIENT_TOOL_ITEMS))
+def test_responses_client_tool_handoff_is_tool_calls(traced: InMemorySpanExporter, item_type: str) -> None:
+    """Every item that leaves the caller to act ends the turn like a Chat tool call."""
+    result = _call(_body([_message(_text("On it.")), _CLIENT_TOOL_ITEMS[item_type]]))
+    assert result.output[1].type == item_type
+    attributes = _only_span(traced)
+    assert attributes["llm.finish_reason"] == "tool_calls"
+    assert attributes["llm.completion"] == "On it."
+
+
+@pytest.mark.parametrize("item_type", sorted(_HOSTED_TOOL_ITEMS))
+def test_responses_hosted_tool_is_stop(traced: InMemorySpanExporter, item_type: str) -> None:
+    """Tools OpenAI runs itself do not hand the turn back to the caller."""
+    result = _call(_body([_HOSTED_TOOL_ITEMS[item_type], _message(_text("Done."))]))
+    assert result.output[0].type == item_type
+    assert _only_span(traced)["llm.finish_reason"] == "stop"
+
+
+def test_responses_refusal_excerpt_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With PII redaction on, the completion copied into guardrail findings is scrubbed too,
+    on the LLM span and in the root span's aggregate of the trace's findings."""
+    pytest.importorskip("openai")
+    from openai.resources.responses import AsyncResponses
+    from traccia.processors.redaction_processor import RedactionSpanProcessor
+
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    # Same order as init(): detection, then redaction, then export.
+    provider.add_span_processor(GuardrailDetectorProcessor(heuristics_enabled=False))
+    provider.add_span_processor(RedactionSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(traccia, "_global_tracer_provider", provider)
+    monkeypatch.setattr(instrumentation, "_responses_patched", False)
+    monkeypatch.setattr(AsyncResponses, "create", AsyncResponses.create)
+    assert instrumentation.patch_openai_responses()
+
+    pii = "I can't help with that, jane.doe@example.com, SSN 123-45-6789."
+    try:
+        with traccia.get_tracer("test").start_as_current_span("agent.run"):
+            _call(_body([_message(_text(pii))], status="incomplete", incomplete_reason="max_output_tokens"))
+    finally:
+        provider.shutdown()
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    assert set(spans) == {"llm.openai.responses", "agent.run"}
+    for span in spans.values():
+        findings = json.loads(span.attributes["guardrail.findings"])
+        refusal = next(f for f in findings if f["name"] == "provider_refusal")
+        assert refusal["raw_excerpt"] == (
+            "I can't help with that, [REDACTED_EMAIL], SSN [REDACTED_SSN]."
+        )
+        for value in span.attributes.values():
+            assert "jane.doe@example.com" not in str(value)
+            assert "123-45-6789" not in str(value)
+    assert spans["llm.openai.responses"].attributes["llm.completion"] == (
+        "I can't help with that, [REDACTED_EMAIL], SSN [REDACTED_SSN]."
+    )
+
+
 def test_responses_content_filter_reaches_guardrail_detector(traced: InMemorySpanExporter) -> None:
     """The derived finish reason feeds the same provider content-filter finding as Chat."""
     _call(_body([], status="incomplete", incomplete_reason="content_filter"))
