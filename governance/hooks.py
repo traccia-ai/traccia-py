@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, Optional
 
-from opentelemetry import trace
-
 from traccia.governance import schema as G
 
 
@@ -29,7 +27,9 @@ def disclosure(
     Call when your product shows an AI disclosure banner, label, or synthetic-media notice.
     Writes trace evidence only — it does not display UI. Human review belongs in Governance Hub.
     """
-    span = trace.get_current_span()
+    from traccia.utils.helpers import effective_current_span
+
+    span = effective_current_span()
     if not span or not span.is_recording():
         return
     span.set_attribute(G.EVENT_TYPE, "transparency")
