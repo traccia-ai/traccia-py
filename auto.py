@@ -53,6 +53,14 @@ def _configure_governance(config: dict, config_file: Optional[str]) -> None:
         policy_fail_mode=config.pop("policy_fail_mode", None),
         config_file=config_file,
     )
+    # TRC-307: check outbound HTTP requests under @govern (Environment Boundary).
+    check_outbound = config.pop("check_outbound_http", None)
+    from traccia.governance import outbound_http
+
+    if check_outbound is not None:
+        outbound_http.set_enabled(bool(check_outbound))
+    elif outbound_http.enabled():
+        outbound_http.patch_outbound_http()
 
 
 def init(
@@ -80,6 +88,10 @@ def init(
             policy_fail_mode ("open" or "closed"): overrides your Traccia setting for
             what @govern policy checks do when Traccia gives no answer. Default: follow
             the setting (Settings -> Policy Enforcement), else block.
+            check_outbound_http (bool): check every outbound HTTP request (and each
+            redirect hop) sent inside @govern against your policies before it is sent,
+            so an Environment Boundary policy can stop a non-production agent calling a
+            production URL. Default off; also TRACCIA_CHECK_OUTBOUND_HTTP=1.
         
     Returns:
         TracerProvider instance
