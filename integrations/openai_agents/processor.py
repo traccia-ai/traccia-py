@@ -47,10 +47,16 @@ class TracciaAgentsTracingProcessor:
     def on_trace_start(self, trace: Trace) -> None:
         """Called when an Agents trace starts."""
         try:
-            # Store trace context for span correlation
+            # One Traccia root span per Agents trace, so the run's spans form one trace
+            # (inside the caller's span when there is one).
+            root = self._get_tracer().start_span(
+                getattr(trace, "name", None) or "agents.trace",
+                attributes={"agents.trace_id": trace.trace_id, "agent.span.type": "trace"},
+            )
             self._trace_map[trace.trace_id] = {
                 "trace_id": trace.trace_id,
                 "started_at": getattr(trace, "started_at", None),
+                "span": root,
             }
         except Exception:
             # Don't break agent execution on tracing errors
@@ -59,8 +65,9 @@ class TracciaAgentsTracingProcessor:
     def on_trace_end(self, trace: Trace) -> None:
         """Called when an Agents trace ends."""
         try:
-            # Clean up trace mapping
-            self._trace_map.pop(trace.trace_id, None)
+            entry = self._trace_map.pop(trace.trace_id, None)
+            if entry and entry.get("span"):
+                entry["span"].end()
         except Exception:
             pass
 
@@ -73,9 +80,11 @@ class TracciaAgentsTracingProcessor:
             # Determine span name based on span type
             span_name = self._get_span_name(span_data)
             
-            # Start Traccia span
+            # Start Traccia span under its Agents parent span, else under its trace's root
             attributes = self._extract_attributes(span_data)
-            traccia_span = tracer.start_span(span_name, attributes=attributes)
+            parent = self._span_map.get(getattr(span, "parent_id", None)) or \
+                (self._trace_map.get(getattr(span, "trace_id", None)) or {}).get("span")
+            traccia_span = tracer.start_span(span_name, attributes=attributes, parent=parent)
             
             # Store mapping and start time
             self._span_map[span.span_id] = traccia_span

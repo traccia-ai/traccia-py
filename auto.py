@@ -58,8 +58,8 @@ def _configure_governance(config: dict, config_file: Optional[str]) -> None:
 def init(
     api_key: Optional[str] = None,
     *,
-    auto_start_trace: bool = True,
-    auto_trace_name: str = "root",
+    auto_start_trace: Optional[bool] = None,
+    auto_trace_name: Optional[str] = None,
     config_file: Optional[str] = None,
     **kwargs
 ) -> TracerProvider:
@@ -73,8 +73,11 @@ def init(
     
     Args:
         api_key: Optional API key (required for SaaS, optional for open-source)
-        auto_start_trace: If True, automatically start a root trace (default: True)
-        auto_trace_name: Name for auto-started trace (default: "root")
+        auto_start_trace: If True, start one root trace that spans started in this thread or task
+            (and tasks it starts) join, until exit, stop_tracing() or end_auto_trace() (suits short scripts). Not set: taken from the config
+            file or TRACCIA_AUTO_START_TRACE, else False, so each top-level call starts its own trace.
+        auto_trace_name: Name for auto-started trace. Not set: taken from the config
+            file or TRACCIA_AUTO_TRACE_NAME, else "root".
         config_file: Optional explicit path to config file
         **kwargs: All parameters from start_tracing() can be passed here, plus
             policy_fail_mode ("open" or "closed"): overrides your Traccia setting for
@@ -87,7 +90,8 @@ def init(
     Example:
         >>> import traccia
         >>> traccia.init(api_key="...")
-        >>> # All spans created after this are children of auto-started trace
+        >>> # Each top-level @observe/@govern call starts its own trace;
+        >>> # group calls with `with traccia.trace("run"):` or init(auto_start_trace=True)
     """
     global _started, _init_method, _auto_trace_context, _auto_trace_name
     
@@ -106,6 +110,10 @@ def init(
         _configure_governance(kwargs, config_file)
         return _get_provider()
     
+    # .env first, so its TRACCIA_* values count below (start_tracing() would load it too late)
+    if kwargs.get("load_env", True) is not False:
+        sdk_config.load_dotenv()
+
     # Load config file if exists (lowest priority)
     merged_config = {}
     if config_file or sdk_config.find_config_file():
@@ -119,15 +127,20 @@ def init(
         if value is not None:
             merged_config[key] = value
     
-    # Handle auto_start_trace and auto_trace_name - these are init() specific, not start_tracing()
-    # Get auto_start_trace from merged config or use default
-    final_auto_start = merged_config.pop('auto_start_trace', auto_start_trace)
+    # Handle auto_start_trace and auto_trace_name - these are init() specific, not start_tracing().
+    # A value passed to init() wins; the config file (with its defaults) only fills in when it is not set.
+    # Without a config file, the environment (TRACCIA_AUTO_START_TRACE) still applies.
+    config_auto_start = merged_config.pop('auto_start_trace', None)
+    if config_auto_start is None:
+        config_auto_start = sdk_config.get_env_value('auto_start_trace') or False
+    final_auto_start = auto_start_trace if auto_start_trace is not None else config_auto_start
     if isinstance(final_auto_start, str):
         # Convert string to bool if needed
         final_auto_start = final_auto_start.lower() in ('true', '1', 'yes')
     
     # Store auto-trace config before calling start_tracing
-    _auto_trace_name = merged_config.pop('auto_trace_name', auto_trace_name)
+    config_trace_name = merged_config.pop('auto_trace_name', None) or sdk_config.get_env_value('auto_trace_name') or "root"
+    _auto_trace_name = auto_trace_name if auto_trace_name is not None else config_trace_name
     
     # Map config file keys to start_tracing() parameter names
     # Config file uses shorter names, start_tracing() uses full names
@@ -158,8 +171,9 @@ def init(
     # Auto-start trace if requested
     if final_auto_start:
         _auto_trace_context = _start_auto_trace(provider, _auto_trace_name)
-        if not _registered_shutdown:
-            atexit.register(_cleanup_auto_trace)
+        # Registered after this provider and its exit hooks exist, so it runs before them
+        # (atexit is last-in, first-out), also after stop_tracing() and a new init().
+        atexit.register(_end_auto_trace_at_exit)
     
     return provider
 
@@ -188,14 +202,13 @@ def _start_auto_trace(provider: TracerProvider, name: str = "root") -> Any:
         )
         
         # Make this span the current span in the context
-        from opentelemetry import context
-        from opentelemetry.trace import set_span_in_context
-        
-        token = context.attach(set_span_in_context(span._otel_span))
+        from traccia.utils.helpers import activate_span
+
+        activation = activate_span(span._otel_span)
         
         logger.debug(f"Auto-started trace '{name}' created")
         
-        return {"span": span, "token": token}
+        return {"span": span, "token": activation[0], "ctx": activation[1], "activation": activation}
     
     except Exception as e:
         logger.error(f"Failed to start auto-trace: {e}")
@@ -212,20 +225,37 @@ def _cleanup_auto_trace() -> None:
         
         try:
             span = _auto_trace_context["span"]
-            if hasattr(span, "is_recording") and span.is_recording():
-                span.end()
-                logger.debug("Auto-started trace ended")
+            # Traccia spans have no is_recording(); end() does nothing on a span that already ended.
+            span.end()
+            logger.debug("Auto-started trace ended")
             
-            # Detach context
-            if _auto_trace_context.get("token"):
-                from opentelemetry import context
-                context.detach(_auto_trace_context["token"])
+            # Detached only in the context that attached the root, while the root is still its
+            # innermost active span. From another thread or task, or under an active child, the
+            # ended root stays in that context but is skipped as a parent (deactivate_span()).
+            if _auto_trace_context.get("activation"):
+                from traccia.utils.helpers import deactivate_span
+                deactivate_span(_auto_trace_context["activation"])
         
         except Exception as e:
             logger.error(f"Error cleaning up auto-trace: {e}")
         
         finally:
             _auto_trace_context = None
+
+
+def _end_auto_trace_at_exit() -> None:
+    """Exit hook: settle LLM calls still in flight, then end the auto-started root, as
+    stop_tracing() does, so the provider's own exit hook (run after this one) exports both."""
+    if not _auto_trace_context:
+        return
+    if _started:
+        try:
+            from traccia.governance.pep import settle_open_calls
+
+            settle_open_calls()
+        except Exception:
+            pass
+    _cleanup_auto_trace()
 
 
 def end_auto_trace() -> None:

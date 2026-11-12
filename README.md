@@ -416,6 +416,26 @@ Traccia merges configuration from multiple sources with the following priority (
 
 ---
 
+### How spans are grouped into traces
+
+Each top-level call (an `@observe` or `@govern` function, or a span, with no active parent) starts its own trace. Calls made inside it are spans of that trace. This is how OpenTelemetry, Langfuse, LangSmith and Braintrust work, and it is what you want for servers: one trace per request or agent run.
+
+To put several calls in one trace, wrap them:
+
+```python
+import traccia
+
+traccia.init()
+
+with traccia.trace("nightly-batch"):
+    step_one()
+    step_two()
+```
+
+For a short script where the whole run should be one trace, `init(auto_start_trace=True)` (or `auto_start_trace = true` in `traccia.toml`, or `TRACCIA_AUTO_START_TRACE=true`, also from `.env`) starts a root span on init. The spans started in the thread or task that called init(), and in tasks it starts join it. It ends at exit (after calls still in flight are settled), `stop_tracing()`, `end_auto_trace()` or `traccia.trace()`, and is then exported. Threads started separately (for example a server's worker threads) do not join it. Do not use it in a long-running service: requests handled in that context would join one trace that only ends when the process does.
+
+Framework integrations group their own runs: each OpenAI Agents SDK trace becomes one Traccia trace, and each top-level LangChain chain invocation becomes one trace with its LLM calls inside. Calls made inside your own `@observe` function or `traccia.trace()` block join that trace instead.
+
 ### Configuration File
 
 Create a `traccia.toml` file in your project root:
@@ -436,7 +456,7 @@ api_key = ""
 endpoint = "https://api.traccia.ai/v2/traces"
 
 sample_rate = 1.0           # 0.0 to 1.0
-auto_start_trace = true     # Auto-start root trace on init
+auto_start_trace = false    # true: one root trace for the whole run of a script (scripts only)
 auto_trace_name = "root"    # Name for auto-started trace
 use_otlp = true             # Use OTLP exporter
 # service_name = "my-app"   # Optional service name
@@ -1087,7 +1107,7 @@ Initialize the Traccia SDK. All parameters are optional; configuration is merged
 - `endpoint` (str): OTLP endpoint URL (default: `https://api.traccia.ai/v2/traces`)
 - `api_key` (str): API key for the Traccia platform
 - `sample_rate` (float): Sampling rate 0.0–1.0 (default: 1.0)
-- `auto_start_trace` (bool): Auto-start a root trace on init (default: True)
+- `auto_start_trace` (bool): Start one root trace on init that spans started in the thread or task that called init(), and in tasks it starts join, until it ends (default: False: each top-level call is its own trace). Also `TRACCIA_AUTO_START_TRACE`
 - `auto_trace_name` (str): Name for the auto-started trace (default: `"root"`)
 - `use_otlp` (bool): Use OTLP exporter (default: True)
 - `service_name` (str): Service name (auto-detected if not set)

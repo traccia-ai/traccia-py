@@ -53,6 +53,10 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         pip install traccia[langchain]
         ```
     """
+
+    # Called in the chain's own context, also from async chains (not in an executor thread),
+    # so the chain span activated in on_chain_start is the parent of work done inside the chain.
+    run_inline = True
     
     def __init__(self):
         """Initialize the callback handler."""
@@ -66,6 +70,21 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         
         # Track parent relationships
         self._parent_map: Dict[UUID, Optional[UUID]] = {}
+        # Span per top-level chain run (no parent run): one invocation is one trace
+        self._chain_spans: Dict[UUID, Any] = {}
+        # Activation (utils.helpers.activate_span) of each chain span made current while its chain runs
+        self._chain_activations: Dict[UUID, Any] = {}
+
+    def _parent_span(self, parent_run_id: Optional[UUID]) -> Any:
+        """Nearest traced ancestor run's span, or None (then the current context decides)."""
+        seen = set()
+        while parent_run_id is not None and parent_run_id not in seen:
+            seen.add(parent_run_id)
+            span = self._spans.get(parent_run_id) or self._chain_spans.get(parent_run_id)
+            if span is not None:
+                return span
+            parent_run_id = self._parent_map.get(parent_run_id)
+        return None
     
     def on_llm_start(
         self,
@@ -90,7 +109,8 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             # Start span
             span = self.tracer.start_as_current_span(
                 "llm.langchain.run",
-                attributes=attributes
+                attributes=attributes,
+                parent=self._parent_span(parent_run_id),
             )
             
             # Store span and start time for metrics
@@ -132,7 +152,8 @@ class TracciaCallbackHandler(BaseCallbackHandler):
             # Start span
             span = self.tracer.start_as_current_span(
                 "llm.langchain.run",
-                attributes=attributes
+                attributes=attributes,
+                parent=self._parent_span(parent_run_id),
             )
             
             # Store span and start time for metrics
@@ -219,9 +240,26 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
-        """Handle chain start event (optional Phase 2)."""
+        """Handle chain start event: a top-level chain run gets a span that its LLM calls join."""
         self._parent_map[run_id] = parent_run_id
-        # Phase 2: Can add chain spans here
+        if parent_run_id is not None:
+            return
+        try:
+            name = kwargs.get("name") or (serialized or {}).get("name")
+            if not name and (serialized or {}).get("id"):
+                name = serialized["id"][-1]
+            span = self.tracer.start_span(
+                "chain.langchain.run",
+                attributes={"langchain.chain.name": str(name or "chain"), "span.type": "chain"},
+            )
+            self._chain_spans[run_id] = span
+            # Make it current while the chain runs, so @observe functions and instrumented
+            # provider calls inside the chain join its trace.
+            from traccia.utils.helpers import activate_span
+            self._chain_activations[run_id] = activate_span(span._otel_span)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Error in on_chain_start: {e}")
     
     def on_chain_end(
         self,
@@ -231,9 +269,15 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> None:
-        """Handle chain end event (optional Phase 2)."""
+        """Handle chain end event."""
         self._parent_map.pop(run_id, None)
-        # Phase 2: Can end chain spans here
+        self._deactivate_chain(run_id)
+        span = self._chain_spans.pop(run_id, None)
+        if span is not None:
+            try:
+                span.end()
+            except Exception:
+                pass
     
     def on_chain_error(
         self,
@@ -243,10 +287,27 @@ class TracciaCallbackHandler(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> None:
-        """Handle chain error event (optional Phase 2)."""
+        """Handle chain error event."""
         self._parent_map.pop(run_id, None)
-        # Phase 2: Can handle chain errors here
+        self._deactivate_chain(run_id)
+        span = self._chain_spans.pop(run_id, None)
+        if span is not None:
+            try:
+                from traccia.tracer.span import SpanStatus
+                span.record_exception(error)
+                span.set_status(SpanStatus.ERROR, str(error))
+                span.end()
+            except Exception:
+                pass
     
+    def _deactivate_chain(self, run_id: UUID) -> None:
+        """Undo the chain span's activation. Async chains end in another task, where it cannot be
+        undone; the ended span is then skipped as a parent in the chain's own context."""
+        activation = self._chain_activations.pop(run_id, None)
+        if activation is not None:
+            from traccia.utils.helpers import deactivate_span
+            deactivate_span(activation)
+
     def _build_llm_attributes(
         self,
         serialized: Dict[str, Any],

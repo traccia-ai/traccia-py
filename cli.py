@@ -138,8 +138,9 @@ endpoint = "{default_endpoint}"
 # Sampling rate (0.0 to 1.0) - controls what percentage of traces are sent
 sample_rate = 1.0
 
-# Auto-start a root trace on init (default: true)
-auto_start_trace = true
+# Start one root trace on init that spans in init()'s thread or task join until exit (default: false).
+# Leave false for servers: each top-level call then gets its own trace.
+auto_start_trace = false
 
 # Name for the auto-started root trace
 auto_trace_name = "root"
