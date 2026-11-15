@@ -7,10 +7,9 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Optional
+from typing import Any, Optional
 
-from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.trace import SpanProcessor as OTelSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor as OTelSpanProcessor
 
 from traccia.errors import RateLimitError
 from traccia.utils.fork import reinit_after_fork
@@ -146,24 +145,27 @@ class RateLimiter:
         now = time.time()
         elapsed = now - self._last_refill_time
         
-        if elapsed > 0:
-            # Add tokens based on rate and elapsed time
+        if self.max_spans_per_second and elapsed > 0:
+            # Add tokens based on rate
             new_tokens = elapsed * self.max_spans_per_second
             self._tokens = min(self._max_tokens, self._tokens + new_tokens)
             self._last_refill_time = now
     
     def get_stats(self) -> dict:
-        """Get rate limiting statistics."""
+        """Get current rate limiter statistics."""
         with self._lock:
-            drop_rate = (self._dropped_spans / self._total_spans * 100) if self._total_spans > 0 else 0
             return {
                 "enabled": self.enabled,
                 "max_spans_per_second": self.max_spans_per_second,
                 "total_spans": self._total_spans,
-                "dropped_spans": self._dropped_spans,
+                "admitted_spans": self._total_spans - self._dropped_spans,
                 "blocked_spans": self._blocked_spans,
-                "drop_rate_percent": round(drop_rate, 2),
-                "current_tokens": round(self._tokens, 2),
+                "dropped_spans": self._dropped_spans,
+                "drop_rate_percent": (
+                    (self._dropped_spans / self._total_spans * 100)
+                    if self._total_spans > 0
+                    else 0.0
+                ),
             }
     
     def reset_stats(self) -> None:
@@ -174,40 +176,46 @@ class RateLimiter:
             self._blocked_spans = 0
 
 
-class RateLimitingSpanProcessor:
+class RateLimitingSpanProcessor(OTelSpanProcessor):
     """
     Span processor that enforces rate limiting before passing to next processor.
     
-    This should be added early in the processor chain to drop spans before
-    they consume resources in downstream processors.
+    Can wrap any other span processor (e.g., BatchSpanProcessor).
+    If a span exceeds the rate limit, it is dropped and not passed to next processor.
     """
     
     def __init__(
         self,
-        next_processor,
+        next_processor: Any = None,
         max_spans_per_second: Optional[float] = None,
         max_block_ms: int = 100,
     ):
         """
-        Initialize rate limiting processor.
+        Initialize rate limiting span processor.
         
         Args:
-            next_processor: Next processor in the chain
+            next_processor: The downstream processor to pass accepted spans to
             max_spans_per_second: Maximum spans per second (None = unlimited)
             max_block_ms: Maximum milliseconds to block before dropping
         """
+        super().__init__()
         self.next_processor = next_processor
         self.rate_limiter = RateLimiter(
             max_spans_per_second=max_spans_per_second,
             max_block_ms=max_block_ms,
         )
     
-    def on_start(self, span, parent_context=None):
+    def on_start(self, span: Any, parent_context: Optional[Any] = None) -> None:
         """Called when span starts - pass through to next processor."""
         if self.next_processor and hasattr(self.next_processor, 'on_start'):
             self.next_processor.on_start(span, parent_context)
+
+    def _on_ending(self, span: Any) -> None:
+        """Called when span is ending - pass through to next processor."""
+        if self.next_processor and hasattr(self.next_processor, '_on_ending'):
+            self.next_processor._on_ending(span)
     
-    def on_end(self, span):
+    def on_end(self, span: Any) -> None:
         """
         Called when span ends - check rate limit before passing to next processor.
         
@@ -225,12 +233,13 @@ class RateLimitingSpanProcessor:
         if self.next_processor and hasattr(self.next_processor, 'on_end'):
             self.next_processor.on_end(span)
 
-    def on_ended(self, span):
+    def on_ended(self, span: Any) -> None:
         """Called once a Traccia span is ended - forward it if on_end() admitted it."""
         if getattr(span, "_rate_limit_admitted", False):
-            self.next_processor.on_ended(span)
+            if self.next_processor and hasattr(self.next_processor, 'on_ended'):
+                self.next_processor.on_ended(span)
     
-    def shutdown(self, timeout: Optional[float] = None):
+    def shutdown(self, timeout: Optional[float] = None) -> None:
         """Shutdown processor and log final stats; timeout (seconds) reaches a next processor that accepts it."""
         stats = self.rate_limiter.get_stats()
         if stats["enabled"] and stats["dropped_spans"] > 0:
@@ -246,17 +255,48 @@ class RateLimitingSpanProcessor:
             else:
                 self.next_processor.shutdown()
     
-    def force_flush(self, timeout_millis: int = 30000, timeout: Optional[float] = None):
-        """
-        Force flush - pass through to next processor.
-
-        OTel calls this with timeout_millis; Traccia's provider and stop_tracing()
-        pass timeout in seconds. The next processor gets its own convention.
-        """
-        if not (self.next_processor and hasattr(self.next_processor, 'force_flush')):
+    def force_flush(
+        self,
+        timeout_millis: int = 30000,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        """Force flush - pass through adapting to processor convention."""
+        if not self.next_processor or not hasattr(self.next_processor, 'force_flush'):
             return True
+
         if timeout is not None:
-            timeout_millis = int(timeout * 1000)
-        if isinstance(self.next_processor, OTelSpanProcessor):
-            return self.next_processor.force_flush(timeout_millis)
-        return self.next_processor.force_flush(timeout=timeout_millis / 1000.0)
+            sec: Optional[float] = float(timeout)
+            ms: int = int(sec * 1000)
+        elif timeout_millis is not None:
+            ms = int(timeout_millis)
+            sec = ms / 1000.0
+        else:
+            ms = 30000
+            sec = 30.0
+
+        return self._forward_force_flush(self.next_processor, ms, sec)
+
+    @staticmethod
+    def _forward_force_flush(processor: Any, timeout_millis: int, timeout_sec: Optional[float]) -> bool:
+        """Forward force_flush adapting timeout argument."""
+        try:
+            params = inspect.signature(processor.force_flush).parameters
+            if "timeout" in params and "timeout_millis" not in params:
+                res = processor.force_flush(timeout=timeout_sec)
+                return True if res is None else bool(res)
+            if "timeout_millis" in params:
+                res = processor.force_flush(timeout_millis=timeout_millis)
+                return True if res is None else bool(res)
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            res = processor.force_flush(timeout_millis=timeout_millis)
+            return True if res is None else bool(res)
+        except TypeError:
+            try:
+                res = processor.force_flush(timeout=timeout_sec)
+                return True if res is None else bool(res)
+            except TypeError:
+                res = processor.force_flush()
+                return True if res is None else bool(res)

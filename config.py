@@ -104,8 +104,8 @@ class TracingConfig(BaseModel):
         description="Sampling rate (0.0 to 1.0)"
     )
     auto_start_trace: bool = Field(
-        default=True,
-        description="Automatically start a root trace on init"
+        default=False,
+        description="Start one root trace on init that spans started in the thread or task that called init(), and in tasks it starts join, until it ends"
     )
     auto_trace_name: str = Field(
         default="root",

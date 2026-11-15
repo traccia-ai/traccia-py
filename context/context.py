@@ -3,7 +3,6 @@
 from contextvars import Token
 from typing import Optional, TYPE_CHECKING
 
-from opentelemetry.trace import get_current_span as otel_get_current_span
 from opentelemetry.trace import set_span_in_context
 from opentelemetry import context as context_api
 
@@ -15,10 +14,14 @@ def get_current_span() -> Optional["Span"]:
     """
     Return the currently active span, if any.
     
-    Uses OpenTelemetry's context API internally.
+    Uses OpenTelemetry's context API internally, skipping a span that ended but is still
+    current because Traccia could not undo its activation here (an async LangChain chain, or
+    the auto-started root ended from another thread or task).
     """
-    otel_span = otel_get_current_span()
-    if otel_span and otel_span.get_span_context().is_valid:
+    from traccia.utils.helpers import effective_current_span
+
+    otel_span = effective_current_span()
+    if otel_span is not None:
         # Unsampled spans keep their attributes only on the original wrapper
         existing = getattr(otel_span, '_traccia_span', None)
         if existing is not None:

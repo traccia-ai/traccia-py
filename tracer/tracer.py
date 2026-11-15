@@ -116,10 +116,12 @@ class Tracer:
         
         # If no parent specified, use current span
         if otel_parent_context is None:
-            current_span = get_current_span()
-            if current_span and current_span.get_span_context().is_valid:
-                otel_parent_context = set_span_in_context(current_span)
-                from traccia.utils.helpers import format_span_id
+            # Skips spans that ended but stayed current because Traccia could not undo their
+            # activation in this context (an auto root or LangChain chain ended from another
+            # thread or task): the context before them is used, or a new trace is started.
+            from traccia.utils.helpers import current_span_and_context, format_span_id
+            current_span, otel_parent_context = current_span_and_context()
+            if current_span is not None:
                 parent_span_id = format_span_id(current_span.get_span_context().span_id)
         
         # Sampling is decided by the OTel provider's sampler at span creation
@@ -172,9 +174,9 @@ class Tracer:
 
     def get_current_span(self) -> Optional["Span"]:
         """Get the current span."""
-        from opentelemetry.trace import get_current_span
-        otel_span = get_current_span()
-        if otel_span and otel_span.get_span_context().is_valid:
+        from traccia.utils.helpers import current_span_and_context
+        otel_span, _ = current_span_and_context()
+        if otel_span is not None:
             from traccia.tracer.span import Span
             # Unsampled spans keep their attributes only on the original wrapper
             existing = getattr(otel_span, '_traccia_span', None)
