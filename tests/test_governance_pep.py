@@ -1,9 +1,11 @@
 import copy
 import json
+import logging
 from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.context import attach as otel_context_attach, detach as otel_context_detach
 
 from traccia.governance.pep import check_policy, enforce_llm_call, enforce_tool_call
 from traccia.governance.policy import AgentBlockedError, ApprovalPending, pending_tool_result
@@ -835,3 +837,56 @@ def test_tool_level_reads_survive_customer_filtering(governed_tracing):
     assert refund["context"]["freshness"] == [
         {"tool": "get_refund_policy", "read_at": "2026-01-01T00:00:00Z", "field": "as_of"}
     ]
+
+
+def _stamped_keys(span):
+    """The policy attributes on the exported (OTel) span."""
+    return {k for k in (span._otel_span.attributes or {}) if k.startswith("traccia.policy.")}
+
+
+def test_stamp_span_skips_a_span_that_has_ended(caplog):
+    """A check that returns after its call was cancelled (its span ended) stamps nothing, and
+    OTel logs no "Setting attribute on ended span" warning."""
+    from opentelemetry import trace as otel_trace
+
+    from traccia import get_tracer
+    from traccia.context import get_current_span
+    from traccia.governance.pep import _stamp_span
+
+    decision = {"id": "dec-late", "effect": "allow", "would_have": False}
+    with get_tracer("pep-test").start_as_current_span("llm.call") as span:
+        ctx = otel_trace.set_span_in_context(span._otel_span)
+    # As a worker thread sees it: a copy of the call's context, whose span has since ended.
+    token = otel_context_attach(ctx)
+    try:
+        assert get_current_span() is not None
+        with caplog.at_level(logging.WARNING):
+            _stamp_span(decision)
+    finally:
+        otel_context_detach(token)
+    assert "ended span" not in caplog.text
+    assert not _stamped_keys(span)
+
+
+def test_stamp_span_still_stamps_live_and_unsampled_spans():
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+    from traccia import get_tracer, get_tracer_provider, set_tracer_provider
+    from traccia.governance.pep import _stamp_span
+    from traccia.tracer.provider import TracerProvider
+
+    decision = {"id": "dec-live", "effect": "allow", "would_have": False}
+    with get_tracer("pep-test").start_as_current_span("llm.call") as span:
+        _stamp_span(decision)
+    assert span._otel_span.attributes["traccia.policy.decision_id"] == "dec-live"
+
+    previous = get_tracer_provider()
+    provider = TracerProvider()
+    provider.set_sampler(ALWAYS_OFF)
+    set_tracer_provider(provider)
+    try:
+        with get_tracer("pep-test").start_as_current_span("llm.call") as unsampled:
+            _stamp_span(decision)
+        assert unsampled.attributes["traccia.policy.decision_id"] == "dec-live"
+    finally:
+        set_tracer_provider(previous)
