@@ -78,6 +78,40 @@ _EVAL_ALLOWLIST_PREFIXES = (
 )
 
 
+# Attributes holding JSON-serialized guardrail findings or summaries. A finding's
+# ``raw_excerpt`` copies text from the span (a completion, an error message), so these are
+# decoded and their excerpts scrubbed like the attribute they came from. This covers the
+# per-span findings and the root span's aggregate of every finding in the trace.
+_GUARDRAIL_JSON_KEYS = frozenset({"guardrail.findings", "guardrail.summary"})
+_GUARDRAIL_EXCERPT_FRAGMENTS = ("excerpt",)
+
+
+def _redact_guardrail_json(
+    value: Any,
+    *,
+    fragments: Iterable[str],
+    redact_all_strings: bool,
+) -> Any:
+    """Scrub excerpts inside a JSON guardrail attribute; non-JSON values are redacted as text."""
+    if not isinstance(value, str):
+        return value
+    import json
+
+    try:
+        decoded = json.loads(value)
+    except (ValueError, TypeError):
+        # Not the JSON the detector writes: treat the whole value as content.
+        return redact_string(value)
+    scrubbed = redact_value(
+        decoded,
+        redact_all_strings=redact_all_strings,
+        fragments=tuple(fragments) + _GUARDRAIL_EXCERPT_FRAGMENTS,
+    )
+    if scrubbed == decoded:
+        return value
+    return json.dumps(scrubbed)
+
+
 def _key_is_allowlisted(key: str) -> bool:
     lower = key.lower()
     return any(lower.startswith(p) for p in _EVAL_ALLOWLIST_PREFIXES)
@@ -138,6 +172,11 @@ def redact_attributes(
     for key, value in attrs.items():
         if _key_is_allowlisted(key):
             out[key] = value
+            continue
+        if key in _GUARDRAIL_JSON_KEYS:
+            out[key] = _redact_guardrail_json(
+                value, fragments=fragments, redact_all_strings=redact_all_strings
+            )
             continue
         out[key] = redact_value(value, redact_all_strings=redact_all_strings, key=key, fragments=fragments)
     out[REDACTION_APPLIED] = True

@@ -106,6 +106,91 @@ def _safe_get(obj: Any, path: str, default: Any = None) -> Any:
     return cur if cur is not None else default
 
 
+def _field(obj: Any, name: str) -> Any:
+    """``obj[name]`` for a dict, ``obj.name`` for an SDK model; None when absent."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+# Responses output items that hand control back to the caller, the counterpart of a Chat
+# Completions ``finish_reason`` of "tool_calls": tools the caller runs (function, custom,
+# computer use, local shell, shell, apply_patch) and an MCP call awaiting the caller's
+# approval. Hosted tool items (web_search_call, file_search_call, code_interpreter_call,
+# image_generation_call, mcp_call, ...) run on OpenAI's side and do not end the turn.
+_RESPONSES_CLIENT_TOOL_ITEMS = frozenset(
+    {
+        "function_call",
+        "custom_tool_call",
+        "computer_call",
+        "local_shell_call",
+        "shell_call",
+        "apply_patch_call",
+        "mcp_approval_request",
+    }
+)
+
+# ``incomplete_details.reason`` mapped to the Chat Completions finish_reason vocabulary,
+# so ``llm.finish_reason`` means the same thing for both OpenAI APIs.
+_RESPONSES_INCOMPLETE_REASONS = {"max_output_tokens": "length", "content_filter": "content_filter"}
+
+
+def _responses_completion(resp: Any) -> Optional[str]:
+    """The text a Responses API response produced, or None when it produced none.
+
+    Text lives two levels down: ``output`` is a list of items, and each ``message`` item
+    holds ``content`` parts of type ``output_text``. They are joined the way the SDK's own
+    ``Response.output_text`` joins them. A response that only refused yields the refusal
+    text, so a refusal is still visible on the span.
+    """
+    output = _field(resp, "output")
+    if not isinstance(output, (list, tuple)):
+        return None
+    texts = []
+    refusals = []
+    for item in output:
+        content = _field(item, "content")
+        if not isinstance(content, (list, tuple)):
+            continue
+        for part in content:
+            part_type = _field(part, "type")
+            # "text" is accepted for older or hand-built payloads.
+            if part_type in ("output_text", "text"):
+                text = _field(part, "text")
+                if isinstance(text, str):
+                    texts.append(text)
+            elif part_type == "refusal":
+                refusal = _field(part, "refusal")
+                if isinstance(refusal, str):
+                    refusals.append(refusal)
+    completion = "".join(texts) or "".join(refusals)
+    return completion or None
+
+
+def _responses_finish_reason(resp: Any) -> Optional[str]:
+    """A Chat-style finish reason for a Responses API response.
+
+    The Responses API has no finish_reason; it reports ``status`` and, when incomplete,
+    ``incomplete_details.reason``. A completed response is "tool_calls" when it ends by
+    asking the caller to run a tool and "stop" otherwise. An incomplete one maps its
+    reason ("max_output_tokens" -> "length"; unknown reasons pass through). Other statuses
+    (failed, cancelled, in progress) have no finish reason; ``llm.response.status`` records them.
+    """
+    status = _field(resp, "status")
+    if status == "completed":
+        output = _field(resp, "output")
+        if isinstance(output, (list, tuple)) and any(
+            _field(item, "type") in _RESPONSES_CLIENT_TOOL_ITEMS for item in output
+        ):
+            return "tool_calls"
+        return "stop"
+    if status == "incomplete":
+        reason = _field(_field(resp, "incomplete_details"), "reason")
+        if reason:
+            return _RESPONSES_INCOMPLETE_REASONS.get(str(reason), str(reason))
+    return None
+
+
 def patch_openai() -> bool:
     """Patch OpenAI chat completions for both legacy and new client APIs."""
     global _patched
@@ -353,33 +438,6 @@ def patch_openai_responses() -> bool:
         
         return None, None
 
-    def _extract_responses_output(resp) -> Optional[str]:
-        """Extract output text from Response object."""
-        output = getattr(resp, "output", None) or _safe_get(resp, "output")
-        if not output:
-            return None
-        
-        parts = []
-        for item in output:
-            if isinstance(item, dict):
-                content = item.get("content", [])
-            else:
-                content = getattr(item, "content", [])
-            
-            # Extract text from content items
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        text = c.get("text", "")
-                        if text:
-                            parts.append(text)
-                    elif hasattr(c, "type") and c.type == "text":
-                        text = getattr(c, "text", "")
-                        if text:
-                            parts.append(text)
-        
-        return "\n".join(parts) if parts else None
-
     def _wrap_responses(create_fn: Callable):
         if getattr(create_fn, "_agent_trace_patched", False):
             return create_fn
@@ -449,10 +507,13 @@ def patch_openai_responses() -> bool:
                             span.set_attribute("llm.usage.total_tokens", total_tokens)
                     
                     # Extract completion text
-                    completion = _extract_responses_output(resp)
+                    completion = _responses_completion(resp)
                     if completion:
                         span.set_attribute("llm.completion", completion[:2000])
-                    
+                    finish_reason = _responses_finish_reason(resp)
+                    if finish_reason:
+                        span.set_attribute("llm.finish_reason", finish_reason)
+
                     # Extract status
                     status = getattr(resp, "status", None) or _safe_get(resp, "status")
                     if status:
