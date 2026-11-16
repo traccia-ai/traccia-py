@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- `init(check_outbound_http=True)` (or `TRACCIA_CHECK_OUTBOUND_HTTP=1`) checks every outbound HTTP request sent inside `@govern` against your policies before it is sent, so an Environment Boundary policy can stop an agent outside production from calling a production URL. Each redirect hop is checked (`requests`, and `httpx` sync and async). A deny raises `AgentBlockedError` and a held approval `ApprovalPending` before anything is sent. Requests to Traccia itself are never checked. Off by default
 - Groq chat completions are traced, sync and async, including `stream=True`. A streamed call's span stays open until the stream is read to the end, closed, or garbage collected. Read to the end, it records the full completion, token usage, and cost
 - A streamed call settles for the agent that made it, even if the stream is read under another `run_identity` or after it exits. Cancellation (`asyncio.CancelledError`) and `KeyboardInterrupt` end the span with an error; the governance reservation is released if nothing was received yet, otherwise an estimate of what was received is charged
 - A stream that fails or is cancelled keeps the text received so far on its span. A stream dropped without being finished is finalized (span ended, request aborted, settled) on a background thread, never inside garbage collection, which can run while the thread holds a lock that finalizing needs, such as the HTTP connection pool's
