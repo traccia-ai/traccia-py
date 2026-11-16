@@ -52,6 +52,7 @@ class Tracer:
         attributes: Optional[Dict[str, Any]] = None,
         parent: Optional[Any] = None,
         parent_context: Optional[Any] = None,
+        start_time_ns: Optional[int] = None,
     ) -> "Span":
         """
         Start a new span.
@@ -61,6 +62,8 @@ class Tracer:
             attributes: Optional attributes dictionary
             parent: Optional parent span
             parent_context: Optional parent span context
+            start_time_ns: Optional start time (epoch nanoseconds) for spans that
+                record work that began earlier, such as framework callbacks; now if omitted
         
         Returns:
             Traccia Span instance (wraps OTel Span)
@@ -140,11 +143,13 @@ class Tracer:
             name=name,
             attributes=attributes,
             context=otel_parent_context,
+            start_time=start_time_ns,
         )
         
         # Wrap in Traccia Span
         from traccia.tracer.span import Span
-        return Span(otel_span, self, parent_span_id, name=name, attributes=attributes)
+        return Span(otel_span, self, parent_span_id, name=name, attributes=attributes,
+                    start_time_ns=start_time_ns)
 
     def start_as_current_span(
         self,

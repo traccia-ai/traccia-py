@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -22,19 +23,43 @@ if TYPE_CHECKING:
         pass
 
 
+def _iso_to_ns(value: Any) -> Optional[int]:
+    """Agents SDK ISO-8601 timestamp (``started_at`` / ``ended_at``) -> epoch ns, or None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        text = value.strip()
+        if text.endswith(("Z", "z")):  # fromisoformat accepts "Z" only from Python 3.11
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = dt - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+    except Exception:
+        return None
+
+
 class TracciaAgentsTracingProcessor:
     """
     Traccia processor for OpenAI Agents SDK.
-    
+
     Implements the Agents SDK TracingProcessor interface to capture agent
     runs, tool calls, handoffs, and generations into Traccia spans.
+
+    The callbacks carry the run's hierarchy (``trace_id``, ``parent_id``) and timing
+    (``started_at``, ``ended_at``). Each Agents trace becomes one Traccia trace under a
+    root span (nested in the caller's span when one is active), and each Agents span is
+    parented explicitly on the Traccia span of its Agents parent, so the tree does not
+    depend on which Traccia span happens to be current when a callback runs.
     """
 
     def __init__(self):
         """Initialize the processor."""
-        self._trace_map = {}  # Map Agents trace_id -> Traccia trace context
-        self._span_map = {}   # Map Agents span_id -> Traccia span
-        self._span_start_times = {}  # Map span_id -> start time
+        # Agents trace_id -> {"span": root Traccia span, "last_end_ns": latest child end}
+        self._trace_map: dict[str, dict[str, Any]] = {}
+        # Agents span_id -> {"span": Traccia span, "trace_id": Agents trace_id}
+        self._span_map: dict[str, dict[str, Any]] = {}
         self._tracer = None
 
     def _get_tracer(self):
@@ -44,20 +69,33 @@ class TracciaAgentsTracingProcessor:
             self._tracer = traccia.get_tracer("openai.agents")
         return self._tracer
 
+    def _resolve_parent(self, span: Any) -> Any:
+        """Traccia span for an Agents span's parent: its parent span, else its trace's root."""
+        parent_entry = self._span_map.get(getattr(span, "parent_id", None))
+        if parent_entry is not None:
+            return parent_entry["span"]
+        trace_entry = self._trace_map.get(getattr(span, "trace_id", None))
+        if trace_entry is not None:
+            return trace_entry["span"]
+        # Unknown trace (processor registered mid-run): the caller's current span, if any.
+        return None
+
     def on_trace_start(self, trace: Trace) -> None:
         """Called when an Agents trace starts."""
         try:
+            trace_id = getattr(trace, "trace_id", None)
+            attributes = {"agents.trace_id": trace_id, "agent.span.type": "trace"}
+            group_id = getattr(trace, "group_id", None)
+            if group_id:
+                attributes["agents.group_id"] = str(group_id)
             # One Traccia root span per Agents trace, so the run's spans form one trace
             # (inside the caller's span when there is one).
             root = self._get_tracer().start_span(
                 getattr(trace, "name", None) or "agents.trace",
-                attributes={"agents.trace_id": trace.trace_id, "agent.span.type": "trace"},
+                attributes=attributes,
+                start_time_ns=_iso_to_ns(getattr(trace, "started_at", None)),
             )
-            self._trace_map[trace.trace_id] = {
-                "trace_id": trace.trace_id,
-                "started_at": getattr(trace, "started_at", None),
-                "span": root,
-            }
+            self._trace_map[trace_id] = {"span": root, "last_end_ns": None}
         except Exception:
             # Don't break agent execution on tracing errors
             pass
@@ -65,9 +103,11 @@ class TracciaAgentsTracingProcessor:
     def on_trace_end(self, trace: Trace) -> None:
         """Called when an Agents trace ends."""
         try:
-            entry = self._trace_map.pop(trace.trace_id, None)
+            entry = self._trace_map.pop(getattr(trace, "trace_id", None), None)
             if entry and entry.get("span"):
-                entry["span"].end()
+                # Never end before a child whose framework end time is past our clock.
+                end_ns = max(time.time_ns(), entry.get("last_end_ns") or 0)
+                entry["span"].end(end_time_ns=end_ns)
         except Exception:
             pass
 
@@ -76,32 +116,59 @@ class TracciaAgentsTracingProcessor:
         try:
             tracer = self._get_tracer()
             span_data = span.span_data
-            
-            # Determine span name based on span type
             span_name = self._get_span_name(span_data)
-            
-            # Start Traccia span under its Agents parent span, else under its trace's root
             attributes = self._extract_attributes(span_data)
-            parent = self._span_map.get(getattr(span, "parent_id", None)) or \
-                (self._trace_map.get(getattr(span, "trace_id", None)) or {}).get("span")
-            traccia_span = tracer.start_span(span_name, attributes=attributes, parent=parent)
-            
-            # Store mapping and start time
-            self._span_map[span.span_id] = traccia_span
-            self._span_start_times[span.span_id] = time.time()
+            trace_id = getattr(span, "trace_id", None)
+            if trace_id:
+                attributes["agents.trace_id"] = trace_id
+            attributes["agents.span_id"] = span.span_id
+            parent_id = getattr(span, "parent_id", None)
+            if parent_id:
+                attributes["agents.parent_id"] = parent_id
+
+            parent = self._resolve_parent(span)
+            framework_start_ns = _iso_to_ns(getattr(span, "started_at", None))
+            start_ns = framework_start_ns
+            parent_start_ns = getattr(parent, "start_time_ns", None)
+            if start_ns is not None and isinstance(parent_start_ns, int):
+                # ISO timestamps are truncated to microseconds; keep children inside parents.
+                start_ns = max(start_ns, parent_start_ns)
+
+            traccia_span = tracer.start_span(
+                span_name, attributes=attributes, parent=parent, start_time_ns=start_ns
+            )
+            self._span_map[span.span_id] = {
+                "span": traccia_span,
+                "trace_id": trace_id,
+                "framework_start_ns": framework_start_ns,
+            }
         except Exception:
             # Don't break agent execution
             pass
 
     def on_span_end(self, span: Span[Any]) -> None:
         """Called when an Agents span ends."""
+        traccia_span = None
+        end_ns = None
         try:
-            traccia_span = self._span_map.pop(span.span_id, None)
-            if not traccia_span:
+            entry = self._span_map.pop(span.span_id, None)
+            if not entry:
                 return
-            
-            start_time = self._span_start_times.pop(span.span_id, None)
-            
+            traccia_span = entry["span"]
+
+            # The framework's end time, never before the span's start.
+            framework_end_ns = _iso_to_ns(getattr(span, "ended_at", None))
+            end_ns = max(framework_end_ns or time.time_ns(), traccia_span.start_time_ns)
+            trace_entry = self._trace_map.get(entry.get("trace_id"))
+            if trace_entry is not None:
+                trace_entry["last_end_ns"] = max(trace_entry.get("last_end_ns") or 0, end_ns)
+            # Metrics report the framework's own duration when it gave both times.
+            framework_start_ns = entry.get("framework_start_ns")
+            if framework_start_ns is not None and framework_end_ns is not None:
+                duration = max(framework_end_ns - framework_start_ns, 0) / 1e9
+            else:
+                duration = (end_ns - traccia_span.start_time_ns) / 1e9
+
             # Update attributes with final data
             span_data = span.span_data
             self._update_span_attributes(traccia_span, span_data)
@@ -116,28 +183,27 @@ class TracciaAgentsTracingProcessor:
             span_type = getattr(span_data, "type", None)
             
             # Record agent metrics if this is an agent span
-            if span_type == "agent" and start_time is not None:
-                execution_time = time.time() - start_time
+            if span_type == "agent":
                 agent_name = getattr(span_data, "name", None)
                 self._record_agent_metrics(
                     agent_id=None,  # OpenAI Agents doesn't expose agent ID
                     agent_name=agent_name,
-                    execution_time=execution_time,
+                    execution_time=duration,
                     is_run=True  # Agent spans represent runs
                 )
-            
+
             # Record token/cost metrics if this is a generation span
             if span_type == "generation":
-                self._record_generation_metrics(span_data, start_time)
-            
-            # End the span
-            traccia_span.end()
+                self._record_generation_metrics(span_data, duration)
+
+            # End the span at the framework's end time
+            traccia_span.end(end_time_ns=end_ns)
         except Exception:
             # Ensure span ends even if there's an error
             try:
                 if traccia_span:
-                    traccia_span.end()
-            except:
+                    traccia_span.end(end_time_ns=end_ns)
+            except Exception:
                 pass
     
     def _record_agent_metrics(
@@ -188,7 +254,7 @@ class TracciaAgentsTracingProcessor:
             # Silently fail if metrics recording fails
             pass
 
-    def _record_generation_metrics(self, span_data: Any, start_time: Optional[float]) -> None:
+    def _record_generation_metrics(self, span_data: Any, duration: Optional[float]) -> None:
         """Record token usage, cost, and duration metrics for generation spans."""
         try:
             from traccia.metrics.recorder import get_metrics_recorder
@@ -225,8 +291,7 @@ class TracciaAgentsTracingProcessor:
                 pass
 
             # Duration
-            if start_time is not None:
-                duration = time.time() - start_time
+            if duration is not None:
                 recorder.record_duration(duration, attributes=attributes)
             
             # Tokens
