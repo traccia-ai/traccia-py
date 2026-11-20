@@ -1,4 +1,5 @@
 import copy
+import importlib
 import json
 import logging
 from typing import Any, Optional
@@ -578,7 +579,8 @@ def governed_tracing():
         sent.append(json)
         return MagicMock(status_code=200, json=lambda: {"effect": "allow", "would_have": False, "reasons": []})
 
-    with patch("traccia.governance.govern.check_agent_status"), \
+    # patch.object on the module: on Python < 3.11 the dotted path resolves to the govern() function.
+    with patch.object(importlib.import_module("traccia.governance.govern"), "check_agent_status"), \
          patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")), \
          patch.object(pep._http_session, "post", side_effect=_post):
         yield sent

@@ -86,6 +86,9 @@ def _install_legacy_sdk_only(monkeypatch, sync_cls, async_cls):
     """Register only the legacy fallback path — primary candidate stays absent."""
     fake_genai_pkg = types.ModuleType("google.genai")
     monkeypatch.setitem(sys.modules, "google.genai", fake_genai_pkg)
+    # Hide the real primary path too: once another test has imported google-genai,
+    # google.genai._gaos stays cached and patch_gemini() would patch the real class instead.
+    monkeypatch.setitem(sys.modules, "google.genai._gaos", None)
 
     fake_resources_pkg = types.ModuleType("google.genai.resources")
     monkeypatch.setitem(sys.modules, "google.genai.resources", fake_resources_pkg)

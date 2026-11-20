@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traccia"
-version = "0.1.34"
+version = "0.1.35"
 description = "AI agent control plane SDK: trace, evaluate and govern AI agents with OpenTelemetry, and stop bad LLM and tool calls before they run"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,8 +50,20 @@ langchain = [
     "langchain-core>=0.1.0",
 ]
 
-dev = [
+# Everything the test suite imports. CI installs this with `pip install -e .[test]`.
+# Without these, test_groq_patch.py fails to import, the LangChain tests fail, and
+# the OpenAI / Gemini governance tests fall back to stand-ins or are skipped.
+test = [
     "pytest>=7.0.0",
+    "httpx>=0.23.0",
+    "langchain-core>=0.1.0",
+    "openai>=1.0.0",
+    "groq>=0.4.0",
+    "google-genai>=1.0.0",
+]
+
+dev = [
+    "traccia[test]",
 ]
 
 [project.urls]

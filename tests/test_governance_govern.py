@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,11 +11,15 @@ from traccia import observe, runtime_config
 from traccia.governance.govern import govern
 from traccia.governance.policy import AgentBlockedError, GovernanceConfigError
 
+# The module, not the decorator: traccia.governance re-exports govern(), so on Python < 3.11
+# patch("traccia.governance.govern.x") would look x up on the function.
+govern_module = importlib.import_module("traccia.governance.govern")
+
 
 def test_govern_inherits_agent_id_from_init():
     runtime_config.set_agent_id("from-init")
     try:
-        with patch("traccia.governance.govern.check_agent_status") as check:
+        with patch.object(govern_module, "check_agent_status") as check:
             @govern(policy_fail_mode="closed", name="run")
             def run() -> str:
                 return "ok"
@@ -28,7 +33,7 @@ def test_govern_inherits_agent_id_from_init():
 def test_govern_explicit_agent_id_overrides_init():
     runtime_config.set_agent_id("from-init")
     try:
-        with patch("traccia.governance.govern.check_agent_status") as check:
+        with patch.object(govern_module, "check_agent_status") as check:
             @govern(agent_id="override", name="run")
             def run() -> str:
                 return "ok"
@@ -42,7 +47,7 @@ def test_govern_explicit_agent_id_overrides_init():
 def test_govern_falls_back_to_env(monkeypatch):
     runtime_config.set_agent_id(None)
     monkeypatch.setenv("TRACCIA_AGENT_ID", "from-env")
-    with patch("traccia.governance.govern.check_agent_status") as check:
+    with patch.object(govern_module, "check_agent_status") as check:
         @govern(name="run")
         def run() -> str:
             return "ok"
@@ -56,7 +61,7 @@ def test_govern_without_an_agent_id_is_a_configuration_error(monkeypatch):
     runtime_config.set_agent_id(None)
     monkeypatch.delenv("TRACCIA_AGENT_ID", raising=False)
     ran = []
-    with patch("traccia.governance.govern.check_agent_status") as check:
+    with patch.object(govern_module, "check_agent_status") as check:
         @govern(policy_fail_mode="open", name="run")
         def run() -> str:
             ran.append(1)
@@ -87,7 +92,7 @@ def _outage_tool_run(**govern_kwargs):
 
 def test_govern_blocks_tool_call_during_policy_outage_by_default():
     run, ran, session = _outage_tool_run(name="run")
-    with patch("traccia.governance.govern.check_agent_status"), \
+    with patch.object(govern_module, "check_agent_status"), \
             patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")), \
             patch("traccia.governance.pep._http_session", session):
         with pytest.raises(AgentBlockedError):
@@ -98,7 +103,7 @@ def test_govern_blocks_tool_call_during_policy_outage_by_default():
 
 def test_govern_open_override_allows_tool_call_during_policy_outage():
     run, ran, session = _outage_tool_run(policy_fail_mode="open", name="run")
-    with patch("traccia.governance.govern.check_agent_status"), \
+    with patch.object(govern_module, "check_agent_status"), \
             patch("traccia.governance.pep._credentials", return_value=("key", "https://app.traccia.ai/v1/traces")), \
             patch("traccia.governance.pep._http_session", session):
         assert run() == {"refunded": 500}
@@ -107,7 +112,7 @@ def test_govern_open_override_allows_tool_call_during_policy_outage():
 
 def test_bare_govern_follows_the_traccia_setting(monkeypatch):
     monkeypatch.setenv("TRACCIA_AGENT_ID", "from-env")
-    with patch("traccia.governance.govern.check_agent_status") as check:
+    with patch.object(govern_module, "check_agent_status") as check:
         @govern
         def run():
             return runtime_config.pep_fail_mode()
