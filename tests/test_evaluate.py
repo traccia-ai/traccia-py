@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,10 @@ import pytest
 from traccia.eval.builtins import run_builtin_scorer
 from traccia.eval.evaluate import EvaluateResult, bind_scorer_name, evaluate, _score_span_name
 from traccia.eval.errors import EvaluateError
+
+# The module, not the function: traccia.eval re-exports evaluate(), so on Python < 3.11
+# patch("traccia.eval.evaluate.x") would look x up on the function.
+evaluate_module = importlib.import_module("traccia.eval.evaluate")
 
 
 def test_builtin_exact_match():
@@ -36,7 +41,7 @@ def test_builtin_stamps_type_and_scorer_name():
 
 
 def test_evaluate_local_only():
-    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=True), patch(
+    with patch.object(evaluate_module, "_ensure_eval_tracing", return_value=True), patch(
         "traccia.get_tracer"
     ) as gt, patch("traccia.force_flush"):
         span = MagicMock()
@@ -75,7 +80,7 @@ def test_evaluate_local_only():
 
 
 def test_evaluate_skips_trace_id_without_export():
-    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=False), patch(
+    with patch.object(evaluate_module, "_ensure_eval_tracing", return_value=False), patch(
         "traccia.get_tracer"
     ) as gt, patch("traccia.force_flush"):
         span = MagicMock()
@@ -98,7 +103,7 @@ def test_evaluate_skips_trace_id_without_export():
 
 
 def test_evaluate_error_isolation():
-    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=True), patch(
+    with patch.object(evaluate_module, "_ensure_eval_tracing", return_value=True), patch(
         "traccia.get_tracer"
     ) as gt, patch("traccia.force_flush"):
         span = MagicMock()
@@ -132,7 +137,7 @@ def test_evaluate_error_isolation():
 
 
 def test_evaluate_prompt_label_and_expected_output_alias():
-    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=False), patch(
+    with patch.object(evaluate_module, "_ensure_eval_tracing", return_value=False), patch(
         "traccia.get_tracer"
     ) as gt, patch("traccia.force_flush"):
         span = MagicMock()
@@ -177,7 +182,7 @@ def test_platform_jev_score_keeps_questions():
         "questions": [{"key": "grounded", "label": "Grounded", "passed": False, "score": 0.1}],
         "unsure": False,
     }
-    with patch("traccia.eval.evaluate.eval_client.score_remote", return_value=remote):
+    with patch.object(evaluate_module.eval_client, "score_remote", return_value=remote):
         scored = _run_scorer(
             "Answer Quality",
             row={"input": "q", "expected_output": "a"},
@@ -211,7 +216,7 @@ def test_platform_judge_score_omits_jev_fields():
         "latency_ms": 120,
         "cost_usd": 0.001,
     }
-    with patch("traccia.eval.evaluate.eval_client.score_remote", return_value=remote):
+    with patch.object(evaluate_module.eval_client, "score_remote", return_value=remote):
         scored = _run_scorer(
             "Helpfulness",
             row={"input": "q", "expected_output": "a"},
@@ -259,7 +264,7 @@ def test_score_span_name_and_judge_annotation():
 
 
 def _quiet_evaluate(**kwargs):
-    with patch("traccia.eval.evaluate._ensure_eval_tracing", return_value=False), patch(
+    with patch.object(evaluate_module, "_ensure_eval_tracing", return_value=False), patch(
         "traccia.get_tracer"
     ) as gt, patch("traccia.force_flush"):
         span = MagicMock()
@@ -322,8 +327,8 @@ def test_platform_builtin_keeps_fetched_identity():
         "scorer_snapshot_token": "token",
         "config": {},
     }
-    with patch("traccia.eval.evaluate.eval_client.fetch_scorer", return_value=fetched), patch(
-        "traccia.eval.evaluate.eval_client.score_remote"
+    with patch.object(evaluate_module.eval_client, "fetch_scorer", return_value=fetched), patch.object(
+        evaluate_module.eval_client, "score_remote"
     ) as remote:
         result = _quiet_evaluate(
             name="platform-builtin",

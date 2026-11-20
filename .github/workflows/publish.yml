@@ -10,50 +10,89 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
+# Never run two publishes at once.
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
 jobs:
-  publish:
+  # Run the whole test suite first (same workflow that runs on pull requests).
+  tests:
+    uses: ./.github/workflows/test.yml
+
+  # Build without any PyPI credentials. Nothing in this job can publish.
+  build:
+    needs: tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write  # Required for trusted publishing
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
-          path: "."
-      
+          persist-credentials: false
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.11'
-      
+
+      # Catches a release tagged with a different version than pyproject.toml.
+      - name: Check release tag matches version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::Release tag $TAG does not match pyproject.toml version $VERSION (expected v$VERSION)"
+            exit 1
+          fi
+
+      # Ships the committed data/pricing_snapshot.json as-is; prices change only through
+      # the reviewed pull requests that pricing-refresh.yml opens.
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build twine requests
+          pip install build twine
 
-      - name: Refresh pricing snapshot
-        run: python scripts/build_pricing_snapshot.py
-        working-directory: ${{ github.workspace }}
-      
       - name: Build package
-        run: |
-          python -m build
-      
+        run: python -m build
+
       - name: Check package
-        run: |
-          twine check dist/*
-      
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/
-          print-hash: true
-      
+        run: twine check dist/*
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: dist
           path: dist/
           retention-days: 7
+
+  # Only this job can publish: it gets the PyPI login (OIDC token), waits for
+  # approval in the "pypi" environment, and runs no project code.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/traccia
+    permissions:
+      id-token: write  # Required for trusted publishing
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+        with:
+          packages-dir: dist/
+          print-hash: true
