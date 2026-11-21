@@ -360,6 +360,145 @@ class TestCostAnnotatingProcessor:
         cp_module._staleness_warned.clear()  # restore
 
 
+class TestSourceRefAttribute:
+    def test_span_records_litellm_commit(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+        proc = CostAnnotatingProcessor({"gpt-4o": {"prompt": 0.005, "completion": 0.015}},
+                                       pricing_source_ref="a" * 40)
+        span = _FakeSpan({"llm.model": "gpt-4o", "llm.usage.prompt_tokens": 1, "llm.usage.completion_tokens": 1})
+        proc.on_end(span)
+        assert span.attributes["llm.pricing.source_ref"] == "a" * 40
+
+    def test_update_to_unknown_commit_clears_it(self):
+        from traccia.processors.cost_processor import CostAnnotatingProcessor
+        proc = CostAnnotatingProcessor({}, pricing_source_ref="a" * 40)
+        proc.update_pricing_table({}, pricing_source_ref=None)
+        assert proc.pricing_source_ref is None
+        proc.update_pricing_table({})  # omitted: unchanged
+        assert proc.pricing_source_ref is None
+
+    def test_bundled_snapshot_has_litellm_commit(self, tmp_path, monkeypatch):
+        from traccia import pricing_config
+        monkeypatch.setenv("TRACCIA_PRICING_CACHE_PATH", str(tmp_path / "none.json"))
+        ref = pricing_config.active_source_ref()
+        assert ref and len(ref) == 40
+
+
+# ---------------------------------------------------------------------------
+# check_snapshot and `traccia pricing refresh`
+# ---------------------------------------------------------------------------
+
+def _bundled_snapshot() -> dict:
+    from traccia.processors.cost_engine import BUNDLED_PRICING
+    return {"generated_at": "2026-11-01T00:00:00Z", "source_ref": "b" * 40,
+            "models": {k: dict(v) for k, v in BUNDLED_PRICING.items()}}
+
+
+class TestCheckSnapshot:
+    def test_bundled_snapshot_passes(self):
+        from traccia.pricing_normalizer import check_snapshot
+        assert check_snapshot(_bundled_snapshot()["models"]) == []
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, True, "0.1", None])
+    def test_rejects_invalid_prices(self, bad):
+        from traccia.pricing_normalizer import check_snapshot
+        models = _bundled_snapshot()["models"]
+        models["gpt-4o"]["cached_prompt"] = bad
+        problems = check_snapshot(models)
+        assert any("not a finite number" in p for p in problems)
+        # Invalid prices are rejected in non-strict mode (platform snapshots) too.
+        assert check_snapshot(models, strict=False)
+
+    def test_strict_checks(self):
+        from traccia.pricing_normalizer import check_snapshot
+        problems = check_snapshot({"x": {"prompt": 1.0, "completion": 1.0}}, previous=_bundled_snapshot()["models"])
+        assert any("only 1 models" in p for p in problems)
+        assert any("model count fell" in p for p in problems)
+        assert any("gpt-4o is missing" in p for p in problems)
+        assert check_snapshot({"x": {"prompt": 1.0}}, strict=False) == []
+        assert check_snapshot({}) == ["no models"]
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def getcode(self):
+        return 200
+
+    def getheader(self, name):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestPricingRefresh:
+    def _run(self, tmp_path, monkeypatch, responses):
+        """Run `traccia pricing refresh --source upstream`; responses maps URL → body."""
+        from types import SimpleNamespace
+        from traccia import cli
+        monkeypatch.setenv("TRACCIA_PRICING_CACHE_PATH", str(tmp_path / "pricing.json"))
+        monkeypatch.chdir(tmp_path)
+
+        def fake_urlopen(req, timeout=None):
+            url = req.full_url if hasattr(req, "full_url") else req
+            if url not in responses:
+                raise OSError(f"unreachable: {url}")
+            return _FakeResponse(responses[url])
+
+        monkeypatch.setattr(cli.urllib.request, "urlopen", fake_urlopen)
+        return cli._pricing_refresh(SimpleNamespace(source="upstream")), tmp_path / "pricing.json"
+
+    def test_downloads_reviewed_snapshot(self, tmp_path, monkeypatch):
+        from traccia import cli
+        snap = _bundled_snapshot()
+        code, cache = self._run(tmp_path, monkeypatch,
+                                {cli.TRACCIA_PRICING_SNAPSHOT_URL: json.dumps(snap).encode()})
+        assert code == 0
+        saved = json.loads(cache.read_text())
+        assert saved["source"] == "traccia-py"
+        assert saved["source_ref"] == "b" * 40
+        assert saved["generated_at"] == snap["generated_at"]
+        assert saved["models"] == snap["models"]
+
+    def test_rejects_snapshot_failing_checks(self, tmp_path, monkeypatch):
+        from traccia import cli
+        snap = _bundled_snapshot()
+        snap["models"]["gpt-4o"]["prompt"] = -1
+        code, cache = self._run(tmp_path, monkeypatch,
+                                {cli.TRACCIA_PRICING_SNAPSHOT_URL: json.dumps(snap).encode()})
+        assert code == 1
+        assert not cache.exists()
+
+    def test_rejects_nan_in_body(self, tmp_path, monkeypatch):
+        from traccia import cli
+        body = json.dumps(_bundled_snapshot()).replace('"prompt": 0.0025,', '"prompt": NaN,', 1)
+        assert "NaN" in body
+        code, cache = self._run(tmp_path, monkeypatch, {cli.TRACCIA_PRICING_SNAPSHOT_URL: body.encode()})
+        assert code == 1
+        assert not cache.exists()
+
+    def test_invalid_platform_snapshot_falls_back(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from traccia import cli
+        monkeypatch.setenv("TRACCIA_API_URL", "https://platform.test")
+        platform = {"generated_at": "x", "models": {"gpt-4o": {"prompt": float("nan")}}}
+        responses = {
+            "https://platform.test/v1/pricing/latest": json.dumps(platform).encode(),
+            cli.TRACCIA_PRICING_SNAPSHOT_URL: json.dumps(_bundled_snapshot()).encode(),
+        }
+        self._run(tmp_path, monkeypatch, responses)  # installs the fakes
+        assert cli._pricing_refresh(SimpleNamespace(source=None)) == 0
+        assert json.loads((tmp_path / "pricing.json").read_text())["source"] == "traccia-py"
+
+
 # ---------------------------------------------------------------------------
 # Platform normalizer
 # ---------------------------------------------------------------------------

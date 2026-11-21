@@ -53,8 +53,23 @@ jobs:
             exit 1
           fi
 
-      # Ships the committed data/pricing_snapshot.json as-is; prices change only through
-      # the reviewed pull requests that pricing-refresh.yml opens.
+      # Ships the committed data/pricing_snapshot.json as-is. Its prices are refreshed in
+      # the version bump PR (python scripts/build_pricing_snapshot.py); this refuses a
+      # release whose prices weren't checked against LiteLLM in the last 14 days.
+      - name: Check pricing snapshot is fresh
+        run: |
+          python - <<'PY'
+          import json, sys
+          from datetime import datetime, timezone
+          generated_at = json.load(open("data/pricing_snapshot.json"))["generated_at"]
+          age = datetime.now(timezone.utc) - datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+          if age.days > 14:
+              print(f"::error::data/pricing_snapshot.json is {age.days} days old (generated_at={generated_at}). "
+                    "Run python scripts/build_pricing_snapshot.py in the version bump PR.")
+              sys.exit(1)
+          print(f"Pricing snapshot is {age.days} days old")
+          PY
+
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip

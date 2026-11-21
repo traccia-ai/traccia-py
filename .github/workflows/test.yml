@@ -7,7 +7,7 @@ on:
   push:
     branches: [main]
   workflow_call:
-  workflow_dispatch:  # used by pricing-refresh.yml to test its pull request
+  workflow_dispatch:
 
 permissions:
   contents: read

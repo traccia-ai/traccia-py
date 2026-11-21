@@ -332,53 +332,40 @@ def _doctor(args) -> int:
         return 1
 
 
+# The same reviewed snapshot the SDK ships, as merged on traccia-py main.
+TRACCIA_PRICING_SNAPSHOT_URL = (
+    "https://raw.githubusercontent.com/traccia-ai/traccia-py/main/data/pricing_snapshot.json"
+)
+
+
 def _fetch_from_upstream() -> Optional[dict]:
     """
-    Fetch the latest pricing snapshot from the upstream pricing source.
-    Returns the snapshot dict on success, or None on failure.
+    Fetch traccia's reviewed pricing snapshot from GitHub (traccia-py main).
+    Returns the snapshot dict on success, or None on failure or if it fails the checks.
     Internal helper — not part of the public CLI surface.
     """
-    from datetime import datetime, timezone
+    from traccia.pricing_normalizer import check_snapshot
+    from traccia.processors.cost_engine import BUNDLED_PRICING
 
-    url = (
-        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-        "model_prices_and_context_window.json"
-    )
+    url = TRACCIA_PRICING_SNAPSHOT_URL
+    print(f"Fetching traccia's reviewed pricing snapshot ({url}) …")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "traccia-cli/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            raw_body = resp.read()
-        raw = json.loads(raw_body)
+            snapshot = json.loads(resp.read())
     except Exception as exc:
-        print(f"  Failed to reach upstream pricing source: {exc}", file=sys.stderr)
+        print(f"  Failed to download the pricing snapshot: {exc}", file=sys.stderr)
         return None
 
-    # Normalize to Traccia's per-1K-token schema
-    models: dict = {}
-    for model_id, entry in raw.items():
-        if not isinstance(entry, dict):
-            continue
-        input_cpt = entry.get("input_cost_per_token")
-        output_cpt = entry.get("output_cost_per_token")
-        if input_cpt is None and output_cpt is None:
-            continue
-        m: dict = {}
-        if input_cpt is not None:
-            m["prompt"] = round(float(input_cpt) * 1_000.0, 9)
-        if output_cpt is not None:
-            m["completion"] = round(float(output_cpt) * 1_000.0, 9)
-        if entry.get("cache_creation_input_token_cost") is not None:
-            m["cache_write"] = round(float(entry["cache_creation_input_token_cost"]) * 1_000.0, 9)
-        if entry.get("cache_read_input_token_cost") is not None:
-            m["cached_prompt"] = round(float(entry["cache_read_input_token_cost"]) * 1_000.0, 9)
-        models[model_id] = m
-
-    return {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": "upstream",
-        "source_url": url,
-        "models": models,
-    }
+    if not isinstance(snapshot, dict):
+        print("  Downloaded pricing snapshot is not a JSON object; not saved.", file=sys.stderr)
+        return None
+    problems = check_snapshot(snapshot.get("models"), previous=BUNDLED_PRICING)
+    if problems:
+        print("  Downloaded pricing snapshot failed the sanity check; not saved:\n    - "
+              + "\n    - ".join(problems), file=sys.stderr)
+        return None
+    return {**snapshot, "source": "traccia-py", "source_url": url}
 
 
 def _load_dotenv_if_present() -> None:
@@ -422,14 +409,17 @@ def _pricing_refresh(args) -> int:
 
     Default behaviour (no --source flag):
       1. Try the Traccia platform endpoint (normalised, authoritative).
-      2. If that fails for any reason, automatically fall back to fetching
-         directly from the upstream pricing source.
+      2. If that fails for any reason, fall back to traccia's reviewed pricing
+         snapshot on GitHub (the same file the SDK ships, from traccia-py main).
 
     --source upstream:
       Forces step 2 only — useful if you have no Traccia account or want to
       explicitly bypass the platform.
+
+    Either way the snapshot must pass pricing_normalizer.check_snapshot before it is saved.
     """
     from traccia.pricing_config import write_local_cache, local_cache_info
+    from traccia.pricing_normalizer import check_snapshot
 
     # Load .env from CWD so that TRACCIA_API_KEY (and internal overrides like
     # TRACCIA_API_URL) are available when the CLI is invoked from a project directory.
@@ -468,9 +458,15 @@ def _pricing_refresh(args) -> int:
                 resp_body = resp.read()
                 new_etag = resp.getheader("ETag")
 
-            snapshot = json.loads(resp_body)
+            platform_snapshot = json.loads(resp_body)
+            problems = check_snapshot(
+                platform_snapshot.get("models") if isinstance(platform_snapshot, dict) else None, strict=False
+            )
+            if problems:
+                raise ValueError("invalid pricing snapshot: " + "; ".join(problems))
             if new_etag:
-                snapshot["etag"] = new_etag.strip('"')
+                platform_snapshot["etag"] = new_etag.strip('"')
+            snapshot = platform_snapshot
             print(f"  Platform responded OK.")
 
         except urllib.error.HTTPError as exc:
@@ -480,18 +476,18 @@ def _pricing_refresh(args) -> int:
                 return 0
             print(f"  Platform returned HTTP {exc.code}: {exc.reason}", file=sys.stderr)
             if source is None:
-                print("  Falling back to upstream pricing source …")
+                print("  Falling back to traccia's reviewed snapshot on GitHub …")
         except Exception as exc:
             print(f"  Could not reach platform: {exc}", file=sys.stderr)
             if source is None:
-                print("  Falling back to upstream pricing source …")
+                print("  Falling back to traccia's reviewed snapshot on GitHub …")
 
     if snapshot is None:
         # Step 2: fall back to (or force) upstream source
         snapshot = _fetch_from_upstream()
         if snapshot is None:
             print(
-                "Failed to fetch pricing from both platform and upstream source. "
+                "Failed to fetch pricing from both the platform and GitHub. "
                 "Your current cache (or bundled snapshot) will continue to be used.",
                 file=sys.stderr,
             )
@@ -500,7 +496,9 @@ def _pricing_refresh(args) -> int:
     path = write_local_cache(snapshot)
     model_count = len(snapshot.get("models", {}))
     generated_at = snapshot.get("generated_at", "unknown")
-    print(f"Pricing refreshed: {model_count} models, generated_at={generated_at}")
+    source_ref = snapshot.get("source_ref")
+    print(f"Pricing refreshed: {model_count} models, generated_at={generated_at}"
+          + (f", LiteLLM commit {source_ref[:7]}" if source_ref else ""))
     print(f"Saved to: {path}")
     return 0
 
@@ -516,7 +514,10 @@ def _pricing_status(args) -> int:
     # Bundled snapshot info
     bundled_age = snapshot_age_days(BUNDLED_PRICING_GENERATED_AT)
     bundled_age_str = f"{bundled_age:.0f}d" if bundled_age is not None else "unknown"
+    from traccia.processors import cost_engine
     print(f"Bundled snapshot  : {len(BUNDLED_PRICING)} models, generated_at={BUNDLED_PRICING_GENERATED_AT} (age: {bundled_age_str})")
+    if cost_engine.BUNDLED_PRICING_SOURCE_REF:
+        print(f"  LiteLLM commit  : {cost_engine.BUNDLED_PRICING_SOURCE_REF}")
     print(f"  (Bundled at SDK install time; refreshed on each SDK release.)")
 
     # Local cache info
@@ -529,6 +530,8 @@ def _pricing_status(args) -> int:
         print(f"  source          : {info['source']}")
         if info.get("source_url"):
             print(f"  source_url      : {info['source_url']}")
+        if info.get("source_ref"):
+            print(f"  LiteLLM commit  : {info['source_ref']}")
 
         if age is not None:
             if age > 30:
@@ -910,8 +913,8 @@ Examples:
   traccia check                    Test connectivity to exporter
   traccia check --endpoint URL     Test specific endpoint
   traccia pricing status           Show current pricing snapshot info
-  traccia pricing refresh          Download latest pricing (platform → upstream fallback)
-  traccia pricing refresh --source upstream  Fetch directly from upstream, skip platform
+  traccia pricing refresh          Download latest pricing (platform → GitHub fallback)
+  traccia pricing refresh --source upstream  Fetch traccia's reviewed snapshot from GitHub, skip platform
   traccia pricing clear            Remove local cache, revert to bundled snapshot
 
 For more information, visit: https://github.com/traccia-ai/traccia
@@ -980,15 +983,16 @@ For more information, visit: https://github.com/traccia-ai/traccia
             "(~/.cache/traccia/pricing.json). Future processes will use this cache "
             "instead of the bundled snapshot.\n\n"
             "By default, the Traccia platform is tried first; if unavailable, the "
-            "command automatically falls back to fetching from the upstream pricing source. "
-            "Use --source upstream to skip the platform entirely."
+            "command falls back to traccia's reviewed pricing snapshot on GitHub (the same "
+            "file the SDK ships, as merged on traccia-py main). Downloads that fail the "
+            "sanity check are not saved. Use --source upstream to skip the platform entirely."
         ),
     )
     pricing_refresh.add_argument(
         "--source",
         choices=["upstream"],
         default=None,
-        help="Force fetching directly from the upstream pricing source, bypassing the "
+        help="Fetch traccia's reviewed snapshot from GitHub directly, bypassing the "
              "Traccia platform. Useful when you have no Traccia account.",
     )
     pricing_refresh.set_defaults(func=_pricing_refresh)
