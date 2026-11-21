@@ -1,8 +1,8 @@
 {
-  "generated_at": "2026-11-20T15:05:39Z",
+  "generated_at": "2026-11-21T10:30:15Z",
   "source": "litellm",
-  "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/288798d7b4d7f9b5ac924e77842e9e67938d0983/model_prices_and_context_window.json",
-  "source_ref": "288798d7b4d7f9b5ac924e77842e9e67938d0983",
+  "source_url": "https://raw.githubusercontent.com/BerriAI/litellm/6245f94734938b0cfc25d208064a01806518040d/model_prices_and_context_window.json",
+  "source_ref": "6245f94734938b0cfc25d208064a01806518040d",
   "models": {
     "azure/gpt-realtime-2.1-2026-07-07": {
       "prompt": 0.004,
@@ -1416,6 +1416,66 @@
       "completion": 0.005,
       "cache_write": 0.00125,
       "cached_prompt": 5e-05,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-sol": {
+      "prompt": 0.004,
+      "completion": 0.02,
+      "cache_write": 0.005,
+      "cached_prompt": 0.0004,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-sol-2026-07-09": {
+      "prompt": 0.004,
+      "completion": 0.02,
+      "cache_write": 0.005,
+      "cached_prompt": 0.0004,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-terra": {
+      "prompt": 0.002,
+      "completion": 0.012,
+      "cache_write": 0.0025,
+      "cached_prompt": 0.0002,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-terra-2026-07-09": {
+      "prompt": 0.002,
+      "completion": 0.012,
+      "cache_write": 0.0025,
+      "cached_prompt": 0.0002,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-luna": {
+      "prompt": 0.0002,
+      "completion": 0.0012,
+      "cache_write": 0.00025,
+      "cached_prompt": 2e-05,
+      "_provider": "azure_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 922000,
+      "_max_output_tokens": 128000
+    },
+    "azure_ai/gpt-5.6-luna-2026-07-09": {
+      "prompt": 0.0002,
+      "completion": 0.0012,
+      "cache_write": 0.00025,
+      "cached_prompt": 2e-05,
       "_provider": "azure_ai",
       "_mode": "chat",
       "_max_input_tokens": 922000,
@@ -8879,7 +8939,6 @@
     "gemini-2.5-flash-image": {
       "prompt": 0.0003,
       "completion": 0.0025,
-      "input_audio": 0.001,
       "_provider": "vertex_ai-language-models",
       "_mode": "image_generation",
       "_max_input_tokens": 32768,
@@ -12005,10 +12064,45 @@
       "_max_input_tokens": 524288,
       "_max_output_tokens": 524288
     },
+    "inferenceapis/MiniMaxAI/MiniMax-M3.1-Flash": {
+      "prompt": 0.0002,
+      "completion": 0.00078,
+      "cached_prompt": 2e-05,
+      "_provider": "inferenceapis",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 1048576
+    },
+    "inferenceapis/moonshotai/Kimi-K2.6": {
+      "prompt": 0.00098,
+      "completion": 0.00455,
+      "_provider": "inferenceapis",
+      "_mode": "chat",
+      "_max_input_tokens": 262144,
+      "_max_output_tokens": 262144
+    },
     "inferenceapis/moonshotai/Kimi-K2.7-Code": {
       "prompt": 0.00089,
       "completion": 0.00442,
       "cached_prompt": 0.00018,
+      "_provider": "inferenceapis",
+      "_mode": "chat",
+      "_max_input_tokens": 262144,
+      "_max_output_tokens": 262144
+    },
+    "inferenceapis/moonshotai/Kimi-K3.1-Pro": {
+      "prompt": 0.0026,
+      "completion": 0.013,
+      "cached_prompt": 0.00026,
+      "_provider": "inferenceapis",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 1048576
+    },
+    "inferenceapis/nvidia/NVIDIA-Nemotron-3.5-Super-VL": {
+      "prompt": 0.0002,
+      "completion": 0.00065,
+      "cached_prompt": 3e-05,
       "_provider": "inferenceapis",
       "_mode": "chat",
       "_max_input_tokens": 262144,
@@ -15229,6 +15323,18 @@
       "_provider": "perplexity",
       "_mode": "responses"
     },
+    "perplexity/pplx-embed-v2-context-0.6b": {
+      "prompt": 2e-05,
+      "input_image": 0.0004,
+      "_provider": "perplexity",
+      "_mode": "embedding"
+    },
+    "perplexity/pplx-embed-v2-context-9b": {
+      "prompt": 0.00012,
+      "input_image": 0.00042,
+      "_provider": "perplexity",
+      "_mode": "embedding"
+    },
     "perplexity/pplx-embed-v1-0.6b": {
       "prompt": 4e-06,
       "completion": 0.0,
@@ -15642,6 +15748,48 @@
       "_mode": "chat",
       "_max_input_tokens": 65536,
       "_max_output_tokens": 8192
+    },
+    "resetdata/deepseek/deepseek-v4-flash": {
+      "prompt": 7.432e-05,
+      "completion": 0.0001486,
+      "cached_prompt": 1.351e-05,
+      "_provider": "resetdata",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 65536
+    },
+    "resetdata/google/gemma-4-26b-a4b-it": {
+      "prompt": 6.054e-05,
+      "completion": 0.0003328,
+      "_provider": "resetdata",
+      "_mode": "chat",
+      "_max_input_tokens": 262144,
+      "_max_output_tokens": 8192
+    },
+    "resetdata/qwen/qwen3-coder-30b-a3b-instruct": {
+      "prompt": 7.061e-05,
+      "completion": 0.0002723,
+      "_provider": "resetdata",
+      "_mode": "chat",
+      "_max_input_tokens": 262144,
+      "_max_output_tokens": 65536
+    },
+    "resetdata/qwen/qwen3.8-27b": {
+      "prompt": 0.0002905,
+      "completion": 0.002453,
+      "_provider": "resetdata",
+      "_mode": "chat",
+      "_max_input_tokens": 262144,
+      "_max_output_tokens": 32768
+    },
+    "resetdata/zai/glm-5.3": {
+      "prompt": 0.001189,
+      "completion": 0.003736,
+      "cached_prompt": 0.0001757,
+      "_provider": "resetdata",
+      "_mode": "chat",
+      "_max_input_tokens": 524288,
+      "_max_output_tokens": 32768
     },
     "rerank-english-v3.0": {
       "prompt": 0.0,
@@ -18120,7 +18268,6 @@
     "vertex_ai/gemini-2.5-flash-image": {
       "prompt": 0.0003,
       "completion": 0.0025,
-      "input_audio": 0.001,
       "_provider": "vertex_ai-language-models",
       "_mode": "image_generation",
       "_max_input_tokens": 32768,
@@ -22470,7 +22617,7 @@
       "output_audio": 0.012,
       "_provider": "gemini",
       "_mode": "realtime",
-      "_max_input_tokens": 1048576,
+      "_max_input_tokens": 131072,
       "_max_output_tokens": 8192
     },
     "gemini/gemini-2.5-flash-native-audio-preview-12-2025": {
@@ -29731,6 +29878,30 @@
       "_provider": "perplexity",
       "_mode": "responses"
     },
+    "perplexity/openai/gpt-6.1-terra": {
+      "prompt": 0.001,
+      "completion": 0.005,
+      "cache_write": 0.00125,
+      "cached_prompt": 5e-05,
+      "_provider": "perplexity",
+      "_mode": "responses"
+    },
+    "perplexity/openai/gpt-6.2-astra": {
+      "prompt": 0.008,
+      "completion": 0.04,
+      "cache_write": 0.01,
+      "cached_prompt": 0.0004,
+      "_provider": "perplexity",
+      "_mode": "responses"
+    },
+    "perplexity/openai/gpt-6.2-sol": {
+      "prompt": 0.002,
+      "completion": 0.01,
+      "cache_write": 0.0025,
+      "cached_prompt": 0.0001,
+      "_provider": "perplexity",
+      "_mode": "responses"
+    },
     "perplexity/openai/gpt-6.1-sol": {
       "prompt": 0.002,
       "completion": 0.01,
@@ -30419,7 +30590,7 @@
     },
     "wandb/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B": {
       "prompt": 0.00015,
-      "completion": 0.0005,
+      "completion": 0.00047,
       "cached_prompt": 2e-05,
       "_provider": "wandb",
       "_mode": "chat",
@@ -32128,9 +32299,9 @@
       "_max_output_tokens": 262144
     },
     "fireworks_ai/accounts/fireworks/routers/spot-deepseek-v4-flash": {
-      "prompt": 0.000105,
-      "completion": 0.00021,
-      "cached_prompt": 2.1e-05,
+      "prompt": 7e-05,
+      "completion": 0.00014,
+      "cached_prompt": 1.4e-05,
       "_provider": "fireworks_ai",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
@@ -32146,36 +32317,45 @@
       "_max_output_tokens": 131072
     },
     "fireworks_ai/accounts/fireworks/routers/glm-5p3-spot": {
-      "prompt": 0.00098,
-      "completion": 0.00308,
-      "cached_prompt": 0.000182,
+      "prompt": 0.0007,
+      "completion": 0.0022,
+      "cached_prompt": 0.00013,
       "_provider": "fireworks_ai",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
       "_max_output_tokens": 128000
     },
     "fireworks_ai/accounts/fireworks/routers/deepseek-v4p1-flash-spot": {
-      "prompt": 0.00021,
-      "completion": 0.00084,
-      "cached_prompt": 4.2e-06,
+      "prompt": 0.00015,
+      "completion": 0.0006,
+      "cached_prompt": 3e-06,
       "_provider": "fireworks_ai",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
       "_max_output_tokens": 393216
     },
     "fireworks_ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-ultrafast": {
-      "prompt": 0.0024,
-      "completion": 0.0096,
-      "cached_prompt": 4.8e-05,
+      "prompt": 0.0012,
+      "completion": 0.0048,
+      "cached_prompt": 2.4e-05,
       "_provider": "fireworks_ai",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
       "_max_output_tokens": 393216
     },
     "fireworks_ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot": {
-      "prompt": 0.00021,
-      "completion": 0.00084,
-      "cached_prompt": 4.2e-06,
+      "prompt": 0.00015,
+      "completion": 0.0006,
+      "cached_prompt": 3e-06,
+      "_provider": "fireworks_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 393216
+    },
+    "fireworks_ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-flex": {
+      "prompt": 0.00015,
+      "completion": 0.0006,
+      "cached_prompt": 3e-06,
       "_provider": "fireworks_ai",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
@@ -32227,7 +32407,7 @@
     "gpt-6-rosalind": {
       "prompt": 0.01,
       "completion": 0.05,
-      "cache_write": 0.01875,
+      "cache_write": 0.0125,
       "cached_prompt": 0.001,
       "_provider": "openai",
       "_mode": "chat",
@@ -34952,20 +35132,20 @@
       "_max_output_tokens": 128000
     },
     "databricks/databricks-gemini-4-carbon": {
-      "prompt": 0.002,
-      "completion": 0.01,
-      "cache_write": 0.002,
-      "cached_prompt": 0.002,
+      "prompt": 0.00249998,
+      "completion": 0.01249997,
+      "cache_write": 0.00249998,
+      "cached_prompt": 0.00012502,
       "_provider": "databricks",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
       "_max_output_tokens": 1048576
     },
     "databricks/system.ai.gemini-4-carbon": {
-      "prompt": 0.002,
-      "completion": 0.01,
-      "cache_write": 0.002,
-      "cached_prompt": 0.002,
+      "prompt": 0.00249998,
+      "completion": 0.01249997,
+      "cache_write": 0.00249998,
+      "cached_prompt": 0.00012502,
       "_provider": "databricks",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
@@ -35179,10 +35359,10 @@
       "_max_output_tokens": 128000
     },
     "databricks/system.ai.gemini-4-hydrogen": {
-      "prompt": 0.0015,
-      "completion": 0.0075,
-      "cache_write": 0.0015,
-      "cached_prompt": 0.0015,
+      "prompt": 0.00187502,
+      "completion": 0.00937503,
+      "cache_write": 0.00234374,
+      "cached_prompt": 9.373e-05,
       "_provider": "databricks",
       "_mode": "chat",
       "_max_input_tokens": 1048576,
@@ -35391,6 +35571,24 @@
       "_mode": "responses",
       "_max_input_tokens": 128000,
       "_max_output_tokens": 128000
+    },
+    "openrouter/deepseek/deepseek-v4-pro": {
+      "prompt": 0.0009,
+      "completion": 0.0015,
+      "cached_prompt": 0.0002,
+      "_provider": "openrouter",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 393216
+    },
+    "openrouter/deepseek/deepseek-v4-flash": {
+      "prompt": 9e-05,
+      "completion": 0.00018,
+      "cached_prompt": 1.8e-05,
+      "_provider": "openrouter",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 393216
     },
     "openrouter/cloudflare/clef": {
       "prompt": 0.000192,
@@ -41621,6 +41819,29 @@
       "_mode": "chat",
       "_max_input_tokens": 1048576,
       "_max_output_tokens": 65536
+    },
+    "together_ai/tencent/Hy4": {
+      "prompt": 0.000834,
+      "completion": 0.002501,
+      "cached_prompt": 4.2e-05,
+      "_provider": "together_ai",
+      "_mode": "chat",
+      "_max_input_tokens": 1048576,
+      "_max_output_tokens": 1048576
+    },
+    "baseten/decision-models/baseten-bison-latest": {
+      "prompt": 0.0001,
+      "completion": 0.0,
+      "_provider": "baseten",
+      "_mode": "decisions",
+      "_max_input_tokens": 32768
+    },
+    "baseten/decision-models/baseten-groundhog-latest": {
+      "prompt": 3.5e-05,
+      "completion": 0.0,
+      "_provider": "baseten",
+      "_mode": "decisions",
+      "_max_input_tokens": 16384
     },
     "anthropic.claude-3-haiku-20240307-v1:0": {
       "prompt": 0.00025,
