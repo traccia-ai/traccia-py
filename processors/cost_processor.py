@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 _WARN_AFTER_DAYS = 30
 _INFO_AFTER_DAYS = 7
 
+_UNSET: Any = object()
+
 # Guard so the staleness log fires at most once per process.
 _staleness_warned = threading.Event()
 
@@ -58,6 +60,7 @@ class CostAnnotatingProcessor(SpanProcessor):
       - llm.pricing.generated_at     — ISO timestamp of the pricing snapshot
       - llm.pricing.age_days         — integer age of the snapshot in days
       - llm.pricing.snapshot_version — source identifier of the snapshot
+      - llm.pricing.source_ref       — LiteLLM commit the snapshot was built from, when known
     """
 
     def __init__(
@@ -66,10 +69,12 @@ class CostAnnotatingProcessor(SpanProcessor):
         *,
         pricing_source: str = "bundled",
         pricing_generated_at: str = "unknown",
+        pricing_source_ref: Optional[str] = None,
     ) -> None:
         self.pricing_table = pricing_table or {}
         self.pricing_source = pricing_source
         self.pricing_generated_at = pricing_generated_at
+        self.pricing_source_ref = pricing_source_ref
 
         # Compute and cache age once at construction; refreshed on update_pricing_table.
         self._age_days: Optional[float] = self._compute_age()
@@ -154,6 +159,8 @@ class CostAnnotatingProcessor(SpanProcessor):
         # snapshot_version uses generated_at as the stable identifier (no commit SHA needed
         # when coming from the bundled snapshot; the platform normalises this on ingest).
         span.set_attribute("llm.pricing.snapshot_version", self.pricing_generated_at)
+        if self.pricing_source_ref:
+            span.set_attribute("llm.pricing.source_ref", self.pricing_source_ref)
 
     def shutdown(self) -> None:
         return None
@@ -166,8 +173,13 @@ class CostAnnotatingProcessor(SpanProcessor):
         pricing_table: Dict[str, Dict[str, Any]],
         pricing_source: Optional[str] = None,
         pricing_generated_at: Optional[str] = None,
+        pricing_source_ref: Any = _UNSET,
     ) -> None:
         self.pricing_table = pricing_table
+        # None is a real value here (the new table's commit is unknown), so only an
+        # omitted argument keeps the old one.
+        if pricing_source_ref is not _UNSET:
+            self.pricing_source_ref = pricing_source_ref
         if pricing_source:
             self.pricing_source = pricing_source
         if pricing_generated_at:

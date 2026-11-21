@@ -614,6 +614,7 @@ def start_tracing(
             pricing_table=pricing_table,
             pricing_source=pricing_source,
             pricing_generated_at=pricing_generated_at,
+            pricing_source_ref=pricing_config.active_source_ref(),
         )
         provider.add_span_processor(cost_processor)
         # Initialise the process-level resolver so other paths (e.g. the OpenAI
@@ -1075,7 +1076,8 @@ def _start_pricing_refresh(cost_processor: Optional[CostAnnotatingProcessor], ov
             try:
                 table, source, generated_at = pricing_config.load_pricing_with_source(override)
                 cost_processor.update_pricing_table(
-                    table, pricing_source=source, pricing_generated_at=generated_at
+                    table, pricing_source=source, pricing_generated_at=generated_at,
+                    pricing_source_ref=pricing_config.active_source_ref(),
                 )
                 # Keep the process-level resolver in sync so the OpenAI Agents
                 # integration metric path also picks up the refreshed pricing.
