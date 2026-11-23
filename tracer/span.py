@@ -35,6 +35,7 @@ class Span:
         parent_span_id: Optional[str] = None,
         name: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
+        start_time_ns: Optional[int] = None,
     ) -> None:
         """
         Initialize span wrapper.
@@ -45,6 +46,7 @@ class Span:
             parent_span_id: Parent span ID (hex string, for compatibility)
             name: Span name as requested at start
             attributes: Attributes requested at start
+            start_time_ns: Start time (epoch nanoseconds); now if omitted
         """
         self._otel_span = otel_span
         self.tracer = tracer
@@ -72,7 +74,7 @@ class Span:
         
         # Expose span properties for processor access
         self.name = getattr(otel_span, 'name', 'unknown')
-        self.start_time_ns = time.time_ns()
+        self.start_time_ns = start_time_ns if start_time_ns is not None else time.time_ns()
         self.end_time_ns: Optional[int] = None
         
         # Status
@@ -300,9 +302,14 @@ class Span:
         except Exception:
             pass
 
-    def end(self) -> None:
+    def end(self, end_time_ns: Optional[int] = None) -> None:
         """
         End the span.
+
+        Args:
+            end_time_ns: End time (epoch nanoseconds) for work that finished earlier,
+                such as a framework callback delivered late; now if omitted. Never
+                earlier than the span's start.
         
         Enrichment processors run BEFORE span.end() (span is still mutable).
         Export processors run AFTER span.end() (OTel handles this automatically).
@@ -310,7 +317,7 @@ class Span:
         if self._ended:
             return
         
-        self.end_time_ns = time.time_ns()
+        self.end_time_ns = max(end_time_ns if end_time_ns is not None else time.time_ns(), self.start_time_ns)
         if self.status == SpanStatus.UNSET:
             self.status = SpanStatus.OK
             # Set status on OTel span as well

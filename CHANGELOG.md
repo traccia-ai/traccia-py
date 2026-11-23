@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- OpenAI Agents SDK spans start and end at the times the Agents SDK recorded (`started_at`, `ended_at`) instead of when Traccia's callback ran, and agent and generation duration metrics use those times too (TRC-294). A span never starts before its parent or ends before it starts, and the run's root span ends no earlier than its last span. Each span records `agents.trace_id`, `agents.span_id` and `agents.parent_id`, and the root span records `agents.group_id` when set. `Tracer.start_span()` takes `start_time_ns` and `Span.end()` takes `end_time_ns` for spans that record work timed elsewhere
+
 ## [0.1.35] - 2026-11-21
 
 ### Added
