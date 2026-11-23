@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 # Load the bundled pricing snapshot once at import time
 # ---------------------------------------------------------------------------
 
+# The LiteLLM commit the bundled snapshot was built from; set by _load_bundled_snapshot().
+BUNDLED_PRICING_SOURCE_REF: Optional[str] = None
+
+
 def _load_bundled_snapshot() -> Tuple[Dict[str, Dict[str, Any]], str]:
     """
     Load pricing_snapshot.json shipped inside the traccia.data package.
@@ -45,6 +49,8 @@ def _load_bundled_snapshot() -> Tuple[Dict[str, Dict[str, Any]], str]:
         snapshot = json.loads(data)
         models = snapshot.get("models", {})
         generated_at = snapshot.get("generated_at", "unknown")
+        global BUNDLED_PRICING_SOURCE_REF
+        BUNDLED_PRICING_SOURCE_REF = snapshot.get("source_ref")
         logger.debug(
             "Loaded bundled pricing snapshot (%d models, generated_at=%s)",
             len(models),

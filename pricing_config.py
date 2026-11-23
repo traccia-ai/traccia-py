@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
+from traccia.processors import cost_engine
 from traccia.processors.cost_engine import BUNDLED_PRICING, BUNDLED_PRICING_GENERATED_AT, OVERRIDE_FLAG
 
 logger = logging.getLogger(__name__)
@@ -189,11 +190,23 @@ def local_cache_info() -> Optional[Dict[str, Any]]:
             "generated_at": raw.get("generated_at", "unknown"),
             "source": raw.get("source", "unknown"),
             "source_url": raw.get("source_url"),
+            "source_ref": raw.get("source_ref"),
             "etag": raw.get("etag"),
             "model_count": len(models),
         }
     except Exception:
         return None
+
+
+def active_source_ref() -> Optional[str]:
+    """
+    The LiteLLM commit behind the active base table: the local cache's if it is in use,
+    otherwise the bundled snapshot's. None when unknown (e.g. an older cache file).
+    """
+    if _load_local_cache():
+        info = local_cache_info()
+        return info.get("source_ref") if info else None
+    return cost_engine.BUNDLED_PRICING_SOURCE_REF
 
 
 def snapshot_age_days(generated_at: str) -> Optional[float]:

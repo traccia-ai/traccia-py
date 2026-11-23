@@ -2,12 +2,15 @@
 
 LiteLLM stores cost *per single token*; Traccia stores cost *per 1,000 tokens*.
 Shared by the SDK snapshot builder, tests, and platform pricing refresh.
+check_snapshot() is the sanity check both the builder and `traccia pricing refresh`
+run before saving a snapshot.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Set
+import math
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +118,52 @@ def diff_models(
                 break
 
     return changed
+
+
+# Sanity checks for a pricing snapshot (see check_snapshot).
+MIN_MODELS = 1000
+MAX_MODEL_DROP = 0.10  # more than 10% of the previous models disappearing is suspicious
+# Long-lived names from each major provider; update when LiteLLM retires one.
+REQUIRED_MODELS = ("gpt-4o", "gpt-4o-mini", "claude-sonnet-4-5", "claude-haiku-4-5", "gemini/gemini-2.5-flash")
+
+
+def cost_fields(rates: Dict[str, Any]) -> Dict[str, Any]:
+    """The price fields of one model (fields starting with "_" are metadata)."""
+    return {k: v for k, v in rates.items() if not k.startswith("_")}
+
+
+def _valid_price(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+
+def check_snapshot(
+    models: Any,
+    previous: Optional[Dict[str, Dict[str, Any]]] = None,
+    strict: bool = True,
+) -> List[str]:
+    """
+    Return the problems that make a pricing snapshot unsafe to use (empty list if fine).
+
+    Every price must be a finite number >= 0. With strict=True (traccia's own snapshot)
+    it must also have at least MIN_MODELS models, keep the REQUIRED_MODELS priced, and
+    not lose more than MAX_MODEL_DROP of the models in previous.
+    """
+    if not isinstance(models, dict) or not models:
+        return ["no models"]
+    problems = []
+    bad = [f"{name}.{field}={value!r}" for name, rates in models.items() if isinstance(rates, dict)
+           for field, value in cost_fields(rates).items() if not _valid_price(value)]
+    bad += [f"{name} is not an object" for name, rates in models.items() if not isinstance(rates, dict)]
+    if bad:
+        problems.append(f"{len(bad)} prices are not a finite number >= 0: "
+                        f"{', '.join(bad[:10])}{' …' if len(bad) > 10 else ''}")
+    if strict:
+        if len(models) < MIN_MODELS:
+            problems.append(f"only {len(models)} models (expected at least {MIN_MODELS})")
+        if previous and len(models) < len(previous) * (1 - MAX_MODEL_DROP):
+            problems.append(f"model count fell from {len(previous)} to {len(models)}")
+        for name in REQUIRED_MODELS:
+            rates = models.get(name)
+            if not isinstance(rates, dict) or not rates.get("prompt") or not rates.get("completion"):
+                problems.append(f"{name} is missing or has no prompt/completion price")
+    return problems

@@ -10,6 +10,8 @@ import unittest.mock
 from traccia import init, stop_tracing, get_tracer, end_auto_trace, trace
 from traccia import auto
 
+from ._logs import assert_no_error_logs
+
 
 class TestAutoStartTrace(unittest.TestCase):
     """Test auto-start trace functionality."""
@@ -267,8 +269,7 @@ class TestAutoTraceCleanup(unittest.TestCase):
 
     def _end_without_errors(self, end_somewhere_else):
         # Neither Traccia nor OTel (which logs "Failed to detach context") may log an error.
-        with self.assertNoLogs("traccia.auto", level="ERROR"), \
-                self.assertNoLogs("opentelemetry.context", level="ERROR"):
+        with assert_no_error_logs("traccia.auto", "opentelemetry.context"):
             end_somewhere_else()
         self.assertIsNone(auto._auto_trace_context)
         self.assertTrue(self.root._ended)

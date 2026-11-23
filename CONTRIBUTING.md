@@ -286,6 +286,17 @@ Once your PR is approved and merged:
 - Your changes will be included in the next release
 - Thank you for contributing! 🎉
 
+## Releasing (maintainers)
+
+1. In one pull request: bump `version` in `pyproject.toml`, update `CHANGELOG.md`, and refresh
+   the bundled prices with `python scripts/build_pricing_snapshot.py --summary pricing.md`
+   (paste `pricing.md` into the PR description, don't commit it). Merge it once the tests pass.
+2. Publish a GitHub release on `main` with tag `vX.Y.Z` (matching `pyproject.toml`) and your notes.
+3. `publish.yml` runs the tests, builds the package, and waits for approval in the `pypi`
+   environment before publishing. It stops if the tag doesn't match the version or the bundled
+   prices are more than 14 days old.
+4. After it is published, release traccia-node too: its version bump PR copies these prices.
+
 ## Areas We'd Love Help With
 
 We especially welcome contributions in these areas:

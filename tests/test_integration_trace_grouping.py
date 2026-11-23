@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from traccia import stop_tracing
 from traccia.auto import start_tracing
 
+from ._logs import assert_no_error_logs
+
 
 class _Capture:
     def __init__(self):
@@ -168,7 +170,7 @@ class TestLangChainGrouping(_TracingTest):
     def test_real_runnable_puts_observed_work_and_llm_call_in_the_chain_trace(self):
         from opentelemetry.trace import get_current_span
 
-        with self.assertNoLogs("opentelemetry.context", level="ERROR"):
+        with assert_no_error_logs("opentelemetry.context"):
             self._real_chain().invoke("hi", config={"callbacks": [self.handler]})
         self.assertFalse(get_current_span().get_span_context().is_valid)  # chain span no longer current
         self._assert_real_chain_trace(self.exported())
@@ -179,7 +181,7 @@ class TestLangChainGrouping(_TracingTest):
         async def main():
             await self._real_chain().ainvoke("hi", config={"callbacks": [self.handler]})
 
-        with self.assertNoLogs("opentelemetry.context", level="ERROR"):
+        with assert_no_error_logs("opentelemetry.context"):
             asyncio.run(main())
         self._assert_real_chain_trace(self.exported())
 
@@ -211,7 +213,7 @@ class TestLangChainGrouping(_TracingTest):
                 await chain.ainvoke(text, config={"callbacks": [self.handler]})
                 parents.append(self._effective_parent())
 
-        with self.assertNoLogs("opentelemetry.context", level="ERROR"):
+        with assert_no_error_logs("opentelemetry.context"):
             asyncio.run(main())
         self.assertEqual(parents, [None, None])  # tracer, public lookup and governance agree
         spans = self.exported()
