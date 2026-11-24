@@ -40,6 +40,8 @@ _active_processor: Optional[BatchSpanProcessor] = None
 _init_method: Optional[str] = None  # Track how SDK was initialized: "init" or "start_tracing"
 _auto_trace_context: Optional[Any] = None  # Context for auto-started trace
 _auto_trace_name: str = "root"  # Default name for auto-started trace
+# traccia.toml / environment exporter names -> start_tracing() parameter names
+_EXPORTER_ALIASES = {"enable_console": "enable_console_exporter", "enable_file": "enable_file_exporter"}
 
 
 def _configure_governance(config: dict, config_file: Optional[str]) -> None:
@@ -114,22 +116,31 @@ def init(
     if kwargs.get("load_env", True) is not False:
         sdk_config.load_dotenv()
 
-    # Load config file if exists (lowest priority)
-    merged_config = {}
-    if config_file or sdk_config.find_config_file():
-        file_config = sdk_config.load_config_with_priority(config_file=config_file)
-        merged_config.update(file_config)
-    
-    # Override with explicit parameters (highest priority)
+    # Explicit arguments, with the config file's short exporter names mapped to start_tracing()'s.
+    # The full name wins when both are passed.
+    explicit = {key: value for key, value in kwargs.items() if value is not None}
     if api_key is not None:
-        merged_config['api_key'] = api_key
-    for key, value in kwargs.items():
-        if value is not None:
-            merged_config[key] = value
-    
+        explicit['api_key'] = api_key
+    for short_key, full_key in _EXPORTER_ALIASES.items():
+        if short_key in explicit:
+            value = explicit.pop(short_key)
+            explicit.setdefault(full_key, value)
+
+    # Explicit > environment > config file > start_tracing() default (TRC-296). Only values
+    # the environment or file set are taken, so a False or 0 there counts and an unset one
+    # does not overwrite an explicit argument.
+    explicit_short_names = dict(explicit)
+    for short_key, full_key in _EXPORTER_ALIASES.items():
+        if full_key in explicit_short_names:
+            explicit_short_names[short_key] = explicit_short_names.pop(full_key)
+    merged_config = sdk_config.load_set_config(config_file=config_file, overrides=explicit_short_names)
+    for short_key, full_key in _EXPORTER_ALIASES.items():
+        if short_key in merged_config:
+            merged_config[full_key] = merged_config.pop(short_key)
+    merged_config.update(explicit)
+
     # Handle auto_start_trace and auto_trace_name - these are init() specific, not start_tracing().
-    # A value passed to init() wins; the config file (with its defaults) only fills in when it is not set.
-    # Without a config file, the environment (TRACCIA_AUTO_START_TRACE) still applies.
+    # A value passed to init() wins, then the environment, then the config file.
     config_auto_start = merged_config.pop('auto_start_trace', None)
     if config_auto_start is None:
         config_auto_start = sdk_config.get_env_value('auto_start_trace') or False
@@ -141,17 +152,7 @@ def init(
     # Store auto-trace config before calling start_tracing
     config_trace_name = merged_config.pop('auto_trace_name', None) or sdk_config.get_env_value('auto_trace_name') or "root"
     _auto_trace_name = auto_trace_name if auto_trace_name is not None else config_trace_name
-    
-    # Map config file keys to start_tracing() parameter names
-    # Config file uses shorter names, start_tracing() uses full names
-    key_mapping = {
-        'enable_console': 'enable_console_exporter',
-        'enable_file': 'enable_file_exporter',
-    }
-    for old_key, new_key in key_mapping.items():
-        if old_key in merged_config:
-            merged_config[new_key] = merged_config.pop(old_key)
-    
+
     # Extract rate limiting config to pass separately to start_tracing
     rate_limit_config = {
         'max_spans_per_second': merged_config.pop('max_spans_per_second', None),
@@ -357,7 +358,7 @@ def start_tracing(
     *,
     api_key: Optional[str] = None,
     endpoint: Optional[str] = None,
-    sample_rate: float = 1.0,
+    sample_rate: Optional[float] = None,  # Not set: TRACCIA_SAMPLE_RATE, else 1.0
     max_queue_size: int = 5000,
     max_export_batch_size: int = 512,
     schedule_delay_millis: int = 5000,
@@ -446,10 +447,9 @@ def start_tracing(
     endpoint = env_cfg.get("endpoint") or endpoint
     # Policy, prompts and evals use this key/endpoint pair when it has a key.
     client_config.set_client_config(key, endpoint or DEFAULT_OTLP_TRACE_ENDPOINT)
-    try:
-        sample_rate = float(env_cfg.get("sample_rate", sample_rate))
-    except Exception:
-        sample_rate = sample_rate
+    if sample_rate is None:
+        # An explicit rate, 0 included, wins over TRACCIA_SAMPLE_RATE (TRC-296).
+        sample_rate = env_cfg.get("sample_rate", 1.0)
 
     # Prompt runtime cache — configurable via init(prompt_cache_ttl_s=...) or TRACCIA_PROMPT_CACHE_TTL_S
     _prompt_ttl = prompt_cache_ttl_s
