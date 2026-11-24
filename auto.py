@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, List, Optional, Tuple
 
 from traccia.exporter import ConsoleExporter, FileExporter, OTLPExporter
 from traccia.config import DEFAULT_OTLP_TRACE_ENDPOINT
@@ -40,6 +40,9 @@ _active_processor: Optional[BatchSpanProcessor] = None
 _init_method: Optional[str] = None  # Track how SDK was initialized: "init" or "start_tracing"
 _auto_trace_context: Optional[Any] = None  # Context for auto-started trace
 _auto_trace_name: str = "root"  # Default name for auto-started trace
+# Processors start_tracing() registered, as (provider, processor); stop_tracing() removes them
+# so a later start_tracing() does not run them a second time (TRC-298).
+_init_processors: List[Tuple[TracerProvider, Any]] = []
 
 
 def _configure_governance(config: dict, config_file: Optional[str]) -> None:
@@ -423,6 +426,9 @@ def start_tracing(
             )
         return _get_provider()
 
+    # Left behind only by a start_tracing() that raised partway through.
+    _remove_init_processors()
+
     if load_env:
         sdk_config.load_dotenv()
     
@@ -606,7 +612,7 @@ def start_tracing(
 
     # Ordering matters: enrich spans before batching/export.
     if enable_token_counting:
-        provider.add_span_processor(TokenCountingProcessor())
+        _add_init_processor(provider, TokenCountingProcessor())
     cost_processor = None
     if enable_costs:
         pricing_table, pricing_source, pricing_generated_at = pricing_config.load_pricing_with_source(pricing_override)
@@ -616,7 +622,7 @@ def start_tracing(
             pricing_generated_at=pricing_generated_at,
             pricing_source_ref=pricing_config.active_source_ref(),
         )
-        provider.add_span_processor(cost_processor)
+        _add_init_processor(provider, cost_processor)
         # Initialise the process-level resolver so other paths (e.g. the OpenAI
         # Agents integration metric recorder) use the same pricing table.
         try:
@@ -625,7 +631,8 @@ def start_tracing(
         except Exception:
             pass
     # Agent enrichment: use init-time identity as default so span-level overrides win over resource/defaults.
-    provider.add_span_processor(
+    _add_init_processor(
+        provider,
         AgentEnrichmentProcessor(
             agent_config_path=os.getenv("AGENT_DASHBOARD_AGENT_CONFIG"),
             default_agent_id=runtime_config.get_agent_id(),
@@ -646,7 +653,8 @@ def start_tracing(
     try:
         from traccia.processors.guardrail_detector import GuardrailDetectorProcessor
 
-        provider.add_span_processor(
+        _add_init_processor(
+            provider,
             GuardrailDetectorProcessor(heuristics_enabled=_gr_heur)
         )
     except Exception as _gr_exc:
@@ -674,7 +682,8 @@ def start_tracing(
     try:
         from traccia.processors.governance_enrichment import GovernanceEnrichmentProcessor
 
-        provider.add_span_processor(
+        _add_init_processor(
+            provider,
             GovernanceEnrichmentProcessor(eu_risk_tier=_eu_tier, hipaa_enabled=_hipaa_enabled)
         )
     except Exception as _gov_exc:
@@ -696,7 +705,7 @@ def start_tracing(
         try:
             from traccia.processors.redaction_processor import RedactionSpanProcessor
 
-            provider.add_span_processor(RedactionSpanProcessor())
+            _add_init_processor(provider, RedactionSpanProcessor())
         except Exception as _red_exc:
             import logging
 
@@ -707,7 +716,7 @@ def start_tracing(
 
     # Log after enrichment and redaction so span logs never contain unredacted values.
     if enable_span_logging:
-        provider.add_span_processor(LoggingSpanProcessor())
+        _add_init_processor(provider, LoggingSpanProcessor())
 
     # For OTLP exporter, use OTel's BatchSpanProcessor directly
     # For non-OTLP exporters (console/file), use our custom BatchSpanProcessor
@@ -761,10 +770,10 @@ def start_tracing(
                 max_spans_per_second=max_spans_per_second,
                 max_block_ms=max_block_ms,
             )
-            provider.add_span_processor(rate_limited_processor)
+            _add_init_processor(provider, rate_limited_processor)
             _active_processor = rate_limited_processor
         else:
-            provider.add_span_processor(processor)
+            _add_init_processor(provider, processor)
             _active_processor = processor
 
     if _active_processor:
@@ -892,11 +901,23 @@ def stop_tracing(flush_timeout: Optional[float] = None) -> None:
         else:
             _active_processor.shutdown()
     provider.shutdown()
+    _remove_init_processors()
     _flush_and_shutdown_metrics(flush_timeout)
     client_config.clear_client_config()
     _started = False
     _init_method = None
     _metrics_shutdown = True  # ensure flag set even if _flush_and_shutdown_metrics skipped
+
+
+def _add_init_processor(provider: TracerProvider, processor: Any) -> None:
+    provider.add_span_processor(processor)
+    _init_processors.append((provider, processor))
+
+
+def _remove_init_processors() -> None:
+    while _init_processors:
+        provider, processor = _init_processors.pop()
+        provider.remove_span_processor(processor)
 
 
 def _register_shutdown(provider: TracerProvider, processor: Optional[BatchSpanProcessor]) -> None:
