@@ -194,6 +194,14 @@ def test_unexpected_id_types_do_not_raise(bad):
 # --- failures are no longer silent -----------------------------------------------
 
 
+_TRACER_LOGGER = "traccia.tracer.tracer"
+
+
+def _tracer_records(caplog):
+    """Only the tracer's own records: caplog also captures unrelated OTel warnings."""
+    return [r for r in caplog.records if r.name == _TRACER_LOGGER]
+
+
 class _Boom(SpanProcessor):
     def on_end(self, span):
         raise RuntimeError("boom")
@@ -207,12 +215,13 @@ def test_failing_processor_warns_once_and_does_not_block_others(caplog, monkeypa
     tp.add_span_processor(_Boom())
     tp.add_span_processor(GovernanceEnrichmentProcessor())
     tracer = tp.get_tracer("t")
-    with caplog.at_level(logging.DEBUG, logger="traccia.tracer.tracer"):
+    with caplog.at_level(logging.DEBUG, logger=_TRACER_LOGGER):
         for _ in range(3):
             with tracer.start_as_current_span("x"):
                 pass
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG and "_Boom" in r.getMessage()]
+    records = _tracer_records(caplog)
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    debugs = [r for r in records if r.levelno == logging.DEBUG and "_Boom" in r.getMessage()]
     assert len(warnings) == 1 and "_Boom.on_end" in warnings[0].getMessage()
     assert warnings[0].exc_info is not None
     assert len(debugs) == 2
@@ -223,7 +232,7 @@ def test_failing_processor_warns_once_and_does_not_block_others(caplog, monkeypa
 
 def test_governance_processor_logs_nothing_on_success(caplog, provider):
     tp, _ = provider
-    with caplog.at_level(logging.DEBUG, logger="traccia.tracer.tracer"):
+    with caplog.at_level(logging.DEBUG, logger=_TRACER_LOGGER):
         with tp.get_tracer("t").start_as_current_span("x"):
             pass
-    assert not caplog.records
+    assert not _tracer_records(caplog)
