@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, HttpUrl
 
 from traccia.errors import ConfigError, ValidationError
 
@@ -37,6 +37,7 @@ ENV_VAR_MAPPING = {
     "openai_agents": ["TRACCIA_OPENAI_AGENTS"],
     "crewai": ["TRACCIA_CREWAI"],
     "guardrail_heuristics": ["TRACCIA_GUARDRAIL_HEURISTICS"],
+    "redact_pii": ["TRACCIA_REDACT_PII"],
     
     # Rate limiting & Batching
     "max_spans_per_second": ["TRACCIA_MAX_SPANS_PER_SECOND"],
@@ -88,6 +89,8 @@ DEFAULT_ENDPOINT = DEFAULT_OTLP_TRACE_ENDPOINT  # Backward compatibility alias
 
 class TracingConfig(BaseModel):
     """Tracing configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     api_key: Optional[str] = Field(
         default=None,
@@ -123,6 +126,8 @@ class TracingConfig(BaseModel):
 
 class ExporterConfig(BaseModel):
     """Exporter configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     enable_console: bool = Field(
         default=False,
@@ -162,6 +167,8 @@ class ExporterConfig(BaseModel):
 
 class InstrumentationConfig(BaseModel):
     """Instrumentation configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     enable_patching: bool = Field(
         default=True,
@@ -201,10 +208,16 @@ class InstrumentationConfig(BaseModel):
         default=True,
         description="Enable Tier C heuristic guardrail detection (tool error keyword matching)"
     )
+    redact_pii: Optional[bool] = Field(
+        default=None,
+        description="Mask email/phone/SSN on sensitive span attributes before export (not set: off, on with HIPAA)"
+    )
 
 
 class RateLimitConfig(BaseModel):
     """Rate limiting and batching configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     max_spans_per_second: Optional[float] = Field(
         default=None,
@@ -235,6 +248,8 @@ class RateLimitConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Logging configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     debug: bool = Field(
         default=False,
@@ -248,6 +263,8 @@ class LoggingConfig(BaseModel):
 
 class MetricsConfig(BaseModel):
     """Metrics configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     enable_metrics: bool = Field(
         default=True,
@@ -267,6 +284,8 @@ class MetricsConfig(BaseModel):
 
 class RuntimeConfig(BaseModel):
     """Runtime metadata configuration section."""
+
+    model_config = ConfigDict(extra="forbid")
     
     session_id: Optional[str] = Field(
         default=None,
@@ -300,6 +319,8 @@ class RuntimeConfig(BaseModel):
 
 class AdvancedConfig(BaseModel):
     """Advanced configuration options."""
+
+    model_config = ConfigDict(extra="forbid")
     
     attr_truncation_limit: Optional[int] = Field(
         default=None,
@@ -317,6 +338,8 @@ class TracciaConfig(BaseModel):
     2. Environment variables
     3. Explicit parameters
     """
+
+    model_config = ConfigDict(extra="forbid")
     
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     exporters: ExporterConfig = Field(default_factory=ExporterConfig)
@@ -326,6 +349,8 @@ class TracciaConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     advanced: AdvancedConfig = Field(default_factory=AdvancedConfig)
+    # [governance] is read by traccia.governance.config; listed here so it is not rejected.
+    governance: Dict[str, Any] = Field(default_factory=dict)
     
     @model_validator(mode='after')
     def validate_complete_config(self) -> 'TracciaConfig':
@@ -370,6 +395,7 @@ class TracciaConfig(BaseModel):
             "openai_agents": self.instrumentation.openai_agents,
             "crewai": self.instrumentation.crewai,
             "guardrail_heuristics": self.instrumentation.guardrail_heuristics,
+            "redact_pii": self.instrumentation.redact_pii,
             # Rate limiting & Batching
             "max_spans_per_second": self.rate_limiting.max_spans_per_second,
             "max_queue_size": self.rate_limiting.max_queue_size,
@@ -546,6 +572,7 @@ def load_config_from_env(flat: bool = False) -> Dict[str, Any]:
         "openai_agents",
         "crewai",
         "guardrail_heuristics",
+        "redact_pii",
     ]:
         value = get_env_value(key)
         if value is not None:
@@ -723,6 +750,58 @@ def validate_config(
 
 
 # Backward compatibility functions
+# Flat option name (init()/start_tracing() keyword) -> (section, key) in traccia.toml.
+_FLAT_TO_NESTED: Dict[str, tuple] = {
+    # Tracing
+    "api_key": ("tracing", "api_key"),
+    "endpoint": ("tracing", "endpoint"),
+    "sample_rate": ("tracing", "sample_rate"),
+    "auto_start_trace": ("tracing", "auto_start_trace"),
+    "auto_trace_name": ("tracing", "auto_trace_name"),
+    "use_otlp": ("tracing", "use_otlp"),
+    "service_name": ("tracing", "service_name"),
+    # Exporters
+    "enable_console": ("exporters", "enable_console"),
+    "enable_file": ("exporters", "enable_file"),
+    "file_exporter_path": ("exporters", "file_exporter_path"),
+    "reset_trace_file": ("exporters", "reset_trace_file"),
+    # Instrumentation
+    "enable_patching": ("instrumentation", "enable_patching"),
+    "enable_token_counting": ("instrumentation", "enable_token_counting"),
+    "enable_costs": ("instrumentation", "enable_costs"),
+    "auto_instrument_tools": ("instrumentation", "auto_instrument_tools"),
+    "max_tool_spans": ("instrumentation", "max_tool_spans"),
+    "max_span_depth": ("instrumentation", "max_span_depth"),
+    "openai_agents": ("instrumentation", "openai_agents"),
+    "crewai": ("instrumentation", "crewai"),
+    "guardrail_heuristics": ("instrumentation", "guardrail_heuristics"),
+    "redact_pii": ("instrumentation", "redact_pii"),
+    # Rate limiting & Batching
+    "max_spans_per_second": ("rate_limiting", "max_spans_per_second"),
+    "max_queue_size": ("rate_limiting", "max_queue_size"),
+    "max_block_ms": ("rate_limiting", "max_block_ms"),
+    "max_export_batch_size": ("rate_limiting", "max_export_batch_size"),
+    "schedule_delay_millis": ("rate_limiting", "schedule_delay_millis"),
+    # Metrics
+    "enable_metrics": ("metrics", "enable_metrics"),
+    "metrics_endpoint": ("metrics", "metrics_endpoint"),
+    "metrics_sample_rate": ("metrics", "metrics_sample_rate"),
+    # Runtime
+    "session_id": ("runtime", "session_id"),
+    "user_id": ("runtime", "user_id"),
+    "tenant_id": ("runtime", "tenant_id"),
+    "project_id": ("runtime", "project_id"),
+    "agent_id": ("runtime", "agent_id"),
+    "agent_name": ("runtime", "agent_name"),
+    "env": ("runtime", "env"),
+    # Logging
+    "debug": ("logging", "debug"),
+    "enable_span_logging": ("logging", "enable_span_logging"),
+    # Advanced
+    "attr_truncation_limit": ("advanced", "attr_truncation_limit"),
+}
+
+
 def load_config_with_priority(
     config_file: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None
@@ -746,55 +825,7 @@ def load_config_with_priority(
             "advanced": {}
         }
         
-        # Map flat keys to nested structure
-        flat_to_nested = {
-            # Tracing
-            "api_key": ("tracing", "api_key"),
-            "endpoint": ("tracing", "endpoint"),
-            "sample_rate": ("tracing", "sample_rate"),
-            "auto_start_trace": ("tracing", "auto_start_trace"),
-            "auto_trace_name": ("tracing", "auto_trace_name"),
-            "use_otlp": ("tracing", "use_otlp"),
-            "service_name": ("tracing", "service_name"),
-            # Exporters
-            "enable_console": ("exporters", "enable_console"),
-            "enable_file": ("exporters", "enable_file"),
-            "file_exporter_path": ("exporters", "file_exporter_path"),
-            "reset_trace_file": ("exporters", "reset_trace_file"),
-            # Instrumentation
-            "enable_patching": ("instrumentation", "enable_patching"),
-            "enable_token_counting": ("instrumentation", "enable_token_counting"),
-            "enable_costs": ("instrumentation", "enable_costs"),
-            "auto_instrument_tools": ("instrumentation", "auto_instrument_tools"),
-            "max_tool_spans": ("instrumentation", "max_tool_spans"),
-            "max_span_depth": ("instrumentation", "max_span_depth"),
-            "openai_agents": ("instrumentation", "openai_agents"),
-            "crewai": ("instrumentation", "crewai"),
-            "guardrail_heuristics": ("instrumentation", "guardrail_heuristics"),
-            # Rate limiting & Batching
-            "max_spans_per_second": ("rate_limiting", "max_spans_per_second"),
-            "max_queue_size": ("rate_limiting", "max_queue_size"),
-            "max_block_ms": ("rate_limiting", "max_block_ms"),
-            "max_export_batch_size": ("rate_limiting", "max_export_batch_size"),
-            "schedule_delay_millis": ("rate_limiting", "schedule_delay_millis"),
-            # Metrics
-            "enable_metrics": ("metrics", "enable_metrics"),
-            "metrics_endpoint": ("metrics", "metrics_endpoint"),
-            "metrics_sample_rate": ("metrics", "metrics_sample_rate"),
-            # Runtime
-            "session_id": ("runtime", "session_id"),
-            "user_id": ("runtime", "user_id"),
-            "tenant_id": ("runtime", "tenant_id"),
-            "project_id": ("runtime", "project_id"),
-            "agent_id": ("runtime", "agent_id"),
-            "agent_name": ("runtime", "agent_name"),
-            "env": ("runtime", "env"),
-            # Logging
-            "debug": ("logging", "debug"),
-            "enable_span_logging": ("logging", "enable_span_logging"),
-            # Advanced
-            "attr_truncation_limit": ("advanced", "attr_truncation_limit"),
-        }
+        flat_to_nested = _FLAT_TO_NESTED
         
         for flat_key, value in overrides.items():
             if flat_key in flat_to_nested:
@@ -803,3 +834,37 @@ def load_config_with_priority(
     
     config = load_config(config_file=config_file, overrides=nested_overrides)
     return config.to_flat_dict()
+
+
+def load_set_config(
+    config_file: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Options the config file or the environment set, as a flat dict (environment over file).
+
+    Defaults are left out so the caller's own defaults apply, and a False or 0 that was
+    set is kept. ``overrides`` are the explicit arguments (flat names). They are left out
+    of the result, since the caller applies them as given. The exporter choice among them
+    takes part in validation, so "use_otlp is false and no other exporter" is checked
+    against the final choice.
+
+    Raises:
+        ConfigError: If a value is invalid or the config file has an unknown option
+    """
+    overrides = {k: v for k, v in (overrides or {}).items() if v is not None and k in _FLAT_TO_NESTED}
+    nested: Dict[str, Dict[str, Any]] = {}
+    for flat_key in ("use_otlp", "enable_console", "enable_file"):
+        if flat_key in overrides:
+            section, key = _FLAT_TO_NESTED[flat_key]
+            nested.setdefault(section, {})[key] = overrides[flat_key]
+
+    config = load_config(config_file=config_file, overrides=nested or None)
+    result: Dict[str, Any] = {}
+    for flat_key, (section, key) in _FLAT_TO_NESTED.items():
+        if flat_key in overrides:
+            continue
+        section_model = getattr(config, section)
+        if key in section_model.model_fields_set:
+            result[flat_key] = getattr(section_model, key)
+    return result
