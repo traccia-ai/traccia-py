@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Every span gets `governance.integrity_hash` from the SDK again. The governance enrichment processor formatted the span's trace and span IDs as integers, but they are hex strings, so it raised on every span and the hash was never set (ingestion then filled one in). The hash is `sha256("<trace_id>:<span_id>:<event_type>")` with lowercase, zero-padded hex IDs, the same value the Node SDK and ingestion compute. It identifies the span; it is not a digest of the span's content. Spans already exported keep the hash ingestion gave them, which has the same value
+- A span processor that raises is logged instead of being skipped silently: a warning with the traceback the first time a processor fails, then DEBUG for later failures. Tracing still continues
+
 ## [0.1.36] - 2026-11-28
 
 ### Fixed

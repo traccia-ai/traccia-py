@@ -2,13 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Dict, Optional, Set
 
 from opentelemetry.trace import Tracer as OTelTracer
 from opentelemetry.trace import set_span_in_context
 from opentelemetry import context as context_api
 
 from traccia import runtime_config
+
+_logger = logging.getLogger(__name__)
+# (processor class, hook) pairs that have already logged a warning, so a failing
+# processor is reported once instead of on every span.
+_warned_processor_failures: Set[tuple] = set()
+
+
+def _report_processor_failure(processor: Any, hook: str) -> None:
+    """Log a processor exception: a warning the first time, debug after that."""
+    key = (type(processor), hook)
+    if key in _warned_processor_failures:
+        _logger.debug("Span processor %s.%s failed", type(processor).__name__, hook, exc_info=True)
+        return
+    _warned_processor_failures.add(key)
+    _logger.warning(
+        "Span processor %s.%s raised and was skipped for this span. "
+        "Further failures from it are logged at DEBUG.",
+        type(processor).__name__,
+        hook,
+        exc_info=True,
+    )
 
 
 class Tracer:
@@ -233,8 +255,8 @@ class Tracer:
             try:
                 processor.on_end(span)
             except Exception:
-                # Processors should not crash tracing
-                pass
+                # Processors should not crash tracing, but the failure must be visible.
+                _report_processor_failure(processor, "on_end")
 
     def _run_ended_processors(self, span: "Span") -> None:
         """
@@ -250,5 +272,5 @@ class Tracer:
             try:
                 on_ended(span)
             except Exception:
-                # Processors should not crash tracing
-                pass
+                # Processors should not crash tracing, but the failure must be visible.
+                _report_processor_failure(processor, "on_ended")
