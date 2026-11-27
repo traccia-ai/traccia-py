@@ -54,11 +54,52 @@ class GovernanceEnrichmentProcessor(SpanProcessor):
                     "for healthcare onboarding. Enabling this does not make you HIPAA compliant."
                 )
         if G.INTEGRITY_HASH not in attrs:
-            trace_id = ""
-            span_id = ""
-            if hasattr(span, "context"):
-                ctx = span.context
-                trace_id = format(ctx.trace_id, "032x") if ctx else ""
-                span_id = format(ctx.span_id, "016x") if ctx else ""
-            payload = f"{trace_id}:{span_id}:{event_type}"
-            span.set_attribute(G.INTEGRITY_HASH, hashlib.sha256(payload.encode()).hexdigest())
+            ctx = getattr(span, "context", None)
+            span.set_attribute(
+                G.INTEGRITY_HASH,
+                integrity_fingerprint(
+                    getattr(ctx, "trace_id", None),
+                    getattr(ctx, "span_id", None),
+                    event_type,
+                ),
+            )
+
+
+def _canonical_id(value: Any, width: int) -> str:
+    """Return an OTel ID as lowercase hex, zero-padded to ``width`` characters.
+
+    Accepts the int form (OTel SDK), the hex-string form (Traccia ``SpanContext``,
+    OTLP JSON, with or without ``0x``) and raw bytes (OTLP protobuf). A missing or
+    unrecognised value gives ``""``.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return format(value, f"0{width}x") if value >= 0 else ""
+    if isinstance(value, (bytes, bytearray)):
+        return value.hex().zfill(width)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text.startswith("0x"):
+            text = text[2:]
+        if not text:
+            return ""
+        try:
+            int(text, 16)
+        except ValueError:
+            return text
+        return text.zfill(width)
+    return ""
+
+
+def integrity_fingerprint(trace_id: Any, span_id: Any, event_type: Any) -> str:
+    """SDK span fingerprint, contract v1.
+
+    ``sha256("<trace_id>:<span_id>:<event_type>")`` as lowercase hex, where the trace ID
+    is 32 and the span ID 16 lowercase hex characters. This is the same payload the
+    Node SDK and the ingestion backfill (``governance_normalizer``) hash, so a span gets
+    the same value whichever side computes it. It identifies the span; it is not a
+    digest of the span's content.
+    """
+    payload = f"{_canonical_id(trace_id, 32)}:{_canonical_id(span_id, 16)}:{event_type or ''}"
+    return hashlib.sha256(payload.encode()).hexdigest()
