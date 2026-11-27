@@ -116,6 +116,8 @@ class TracciaSpanAdapter:
         self._otel_span = otel_span
         self.tracer = tracer
         self.parent_span_id = parent_span_id
+        # Exceptions recorded explicitly (by identity); exits don't record them again.
+        self._recorded_exceptions: list = []
         
         # Get span context
         otel_context = otel_span.get_span_context()
@@ -253,24 +255,35 @@ class TracciaSpanAdapter:
         )
     
     def record_exception(self, error: BaseException) -> None:
-        """Record an exception event on the span."""
-        # Add to Traccia events list
-        self.add_event(
-            "exception",
-            {
+        """Record an exception event on the span (exported once)."""
+        # Keep it in Traccia's own events list without forwarding it to OpenTelemetry:
+        # OTel's record_exception below exports the event (with exception.escaped).
+        # Forwarding both exported every exception twice.
+        self.events.append({
+            "name": "exception",
+            "attributes": {
                 "exception.type": error.__class__.__name__,
                 "exception.message": str(error),
                 "exception.stacktrace": "".join(
                     traceback.format_exception(error.__class__, error, error.__traceback__)
                 ),
             },
-        )
+            "timestamp_ns": time.time_ns(),
+        })
         
         # Record on OTel span
         self._otel_span.record_exception(error)
+        self._recorded_exceptions.append(error)
         
         # Set error status
         self.set_status(TracciaSpanStatus.ERROR, str(error))
+
+    def record_escaping_exception(self, error: BaseException) -> None:
+        """Record an exception leaving the span, unless it was already recorded explicitly."""
+        if any(seen is error for seen in self._recorded_exceptions):
+            self.set_status(TracciaSpanStatus.ERROR, str(error))
+            return
+        self.record_exception(error)
     
     def set_status(self, status: TracciaSpanStatus, description: Optional[str] = None) -> None:
         """Set the span status."""
@@ -306,8 +319,8 @@ class TracciaSpanAdapter:
     def __exit__(self, exc_type, exc, tb) -> bool:
         """Exit context manager."""
         try:
-            if exc:
-                self.record_exception(exc)
+            if exc is not None:
+                self.record_escaping_exception(exc)
             self.end()
         finally:
             if self._activation_tokens:
@@ -323,8 +336,8 @@ class TracciaSpanAdapter:
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         """Exit async context manager."""
         try:
-            if exc:
-                self.record_exception(exc)
+            if exc is not None:
+                self.record_escaping_exception(exc)
             self.end()
         finally:
             if self._activation_tokens:

@@ -51,6 +51,10 @@ class Span:
         self.parent_span_id = parent_span_id
         self._ended = False
         self._activation_token = None
+        # Exceptions recorded explicitly on this span (kept by identity, for its lifetime).
+        # An exit doesn't record them again: wrappers like @observe record an exception
+        # and re-raise it inside the span's `with` block.
+        self._recorded_exceptions: list = []
         
         # Store tracer reference on OTel span for context retrieval
         otel_span._traccia_tracer = tracer
@@ -276,8 +280,20 @@ class Span:
             self._otel_span.record_exception(error)
         except Exception:
             pass
+        self._recorded_exceptions.append(error)
         
         self.set_status(SpanStatus.ERROR, str(error))
+
+    def record_escaping_exception(self, error: BaseException) -> None:
+        """Record an exception leaving the span, unless it was already recorded explicitly.
+
+        Used by every exit path. Explicit ``record_exception`` calls always record, so the
+        same exception recorded in two attempts still gives two events.
+        """
+        if any(seen is error for seen in self._recorded_exceptions):
+            self.set_status(SpanStatus.ERROR, str(error))
+            return
+        self.record_exception(error)
 
     def set_status(self, status: SpanStatus, description: Optional[str] = None) -> None:
         """Set the span status."""
@@ -363,8 +379,8 @@ class Span:
     def __exit__(self, exc_type, exc, tb) -> bool:
         """Exit context manager."""
         try:
-            if exc:
-                self.record_exception(exc)
+            if exc is not None:
+                self.record_escaping_exception(exc)
             self.end()
         finally:
             if self._activation_token:
@@ -381,8 +397,8 @@ class Span:
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         """Exit async context manager."""
         try:
-            if exc:
-                self.record_exception(exc)
+            if exc is not None:
+                self.record_escaping_exception(exc)
             self.end()
         finally:
             if self._activation_token:

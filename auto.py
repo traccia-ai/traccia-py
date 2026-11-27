@@ -334,8 +334,10 @@ class trace:
         if self.span:
             try:
                 if exc_type:
-                    # Record exception if one occurred
-                    self.span.record_exception(exc_val)
+                    # Record the exception leaving the trace, unless the caller already
+                    # recorded it on the span we returned from __enter__.
+                    record = getattr(self.span, "record_escaping_exception", self.span.record_exception)
+                    record(exc_val)
                     from traccia.tracer.span import SpanStatus
                     self.span.set_status(SpanStatus.ERROR, str(exc_val))
                 

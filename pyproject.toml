@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "traccia"
-version = "0.1.35"
+version = "0.1.36"
 description = "AI agent control plane SDK: trace, evaluate and govern AI agents with OpenTelemetry, and stop bad LLM and tool calls before they run"
 readme = "README.md"
 requires-python = ">=3.9"
