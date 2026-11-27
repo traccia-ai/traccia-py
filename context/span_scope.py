@@ -31,7 +31,10 @@ class SpanScope:
             return
         self._ended = True
         if error is not None:
-            self.span.record_exception(error)
+            # Like a context exit: an exception the caller already recorded on this
+            # span isn't recorded twice.
+            record = getattr(self.span, "record_escaping_exception", self.span.record_exception)
+            record(error)
         self.span.end()
 
     def run(self, fn: Callable[[], T]) -> T:

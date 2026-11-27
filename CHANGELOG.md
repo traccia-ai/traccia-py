@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-11-28
+
+### Fixed
+- An exception is exported as one `exception` span event per occurrence. Before, an exception that escaped `@observe()` (sync or async), an instrumented call (requests, OpenAI, Anthropic, Gemini, Groq, LangChain, CrewAI), an explicit `trace(...)`, or `SpanScope.end(error)` after the caller had already recorded it was exported twice, and `TracciaSpanAdapter.record_exception` always exported two events. A span's exit no longer records an exception that was already recorded on it; explicit `record_exception` calls always record, so the same exception recorded in two attempts is still two events. Spans already exported keep their duplicate events
+- A span used as a context manager (sync or async) now records an exception whose truth value is `False` (a custom `__bool__` or `__len__`). Before, it escaped the span with no `exception` event.
+
 ## [0.1.35] - 2026-11-21
 
 ### Added
