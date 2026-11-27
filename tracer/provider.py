@@ -145,14 +145,25 @@ class TracerProvider:
         """
         # If processor wraps a Traccia enrichment processor, treat as enrichment
         next_processor = getattr(processor, "next_processor", None)
-        if next_processor is not None and not isinstance(next_processor, OTelSpanProcessor):
-            self._enrichment_processors.append(processor)
-        elif isinstance(processor, OTelSpanProcessor):
-            self._otel_provider.add_span_processor(processor)
-            self._export_processors.append(processor)
-        else:
-            # Traccia enrichment processor
-            self._enrichment_processors.append(processor)
+        with self._lock:  # remove_span_processor() rebinds the list
+            if next_processor is not None and not isinstance(next_processor, OTelSpanProcessor):
+                self._enrichment_processors.append(processor)
+            elif isinstance(processor, OTelSpanProcessor):
+                self._otel_provider.add_span_processor(processor)
+                self._export_processors.append(processor)
+            else:
+                # Traccia enrichment processor
+                self._enrichment_processors.append(processor)
+
+    def remove_span_processor(self, processor: Any) -> None:
+        """
+        Stop running an enrichment processor added with add_span_processor().
+
+        Export processors cannot be removed: the OTel SDK has no API for it.
+        Unknown processors are ignored.
+        """
+        with self._lock:
+            self._enrichment_processors = [p for p in self._enrichment_processors if p is not processor]
 
     def set_sampler(self, sampler: Any) -> None:
         """
