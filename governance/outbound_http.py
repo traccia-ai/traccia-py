@@ -12,6 +12,14 @@ Every redirect hop is checked, not only the first URL:
 - ``httpx``: ``Client._send_single_request`` / ``AsyncClient._send_single_request``
   run once per hop.
 
+Only the destination is sent for the check: scheme, host, port and path. User
+names, passwords, query strings and fragments never leave the process, since they
+can carry credentials (signed URLs, tokens).
+
+``patch_status()`` reports which clients are actually checked. When outbound checks
+are on but an installed client could not be patched (an unsupported httpx version),
+a warning is logged once, and that client's requests are not checked.
+
 Requests to Traccia itself, and requests made while a check is running, are never
 checked. A deny raises ``AgentBlockedError`` and a held approval
 ``ApprovalPending`` before anything is sent. When Traccia gives no answer, the
@@ -34,6 +42,9 @@ CONFIG_KEY = "check_outbound_http"
 _TRUTHY = {"1", "true", "yes", "on"}
 _checking: contextvars.ContextVar[bool] = contextvars.ContextVar("traccia_outbound_checking", default=False)
 _patched = {"requests": False, "httpx": False}
+# Per client: "patched", "not_installed" or "unsupported".
+_status = {"requests": "not_installed", "httpx": "not_installed"}
+_warned: set = set()
 
 
 def enabled() -> bool:
@@ -69,6 +80,28 @@ def should_check(url: str) -> bool:
     return host != traccia
 
 
+def sanitize_destination(url: str) -> str:
+    """scheme://host[:port]/path of a URL: no user info, query or fragment.
+
+    The policy matcher needs only these parts. Anything else can carry
+    credentials, so it is never sent.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    out = f"{parts.scheme.lower()}://{host}" if parts.scheme else host
+    if port:
+        out += f":{port}"
+    return out + (parts.path or "")
+
+
 def check_request(method: str, url: str) -> None:
     """Check one outbound request (one hop). Raises when the call must not be sent."""
     if not should_check(url):
@@ -79,7 +112,7 @@ def check_request(method: str, url: str) -> None:
     try:
         check_policy(
             action={"type": "http_request", "name": "http_request", "method": str(method or "GET").upper()},
-            context={"input": {"url": url, "method": str(method or "GET").upper()}},
+            context={"input": {"url": sanitize_destination(url), "method": str(method or "GET").upper()}},
         )
     finally:
         _checking.reset(token)
@@ -100,10 +133,12 @@ def _patch_requests() -> bool:
     try:
         import requests
     except Exception:
+        _status["requests"] = "not_installed"
         return False
     original = requests.Session.send
     if getattr(original, "_traccia_outbound", False):
         _patched["requests"] = True
+        _status["requests"] = "patched"
         return True
 
     def send(self: Any, request: Any, **kwargs: Any):
@@ -113,6 +148,7 @@ def _patch_requests() -> bool:
     send._traccia_outbound = True  # type: ignore[attr-defined]
     requests.Session.send = send
     _patched["requests"] = True
+    _status["requests"] = "patched"
     return True
 
 
@@ -122,11 +158,12 @@ def _patch_httpx() -> bool:
     try:
         import httpx
     except Exception:
+        _status["httpx"] = "not_installed"
         return False
     sync_original = getattr(httpx.Client, "_send_single_request", None)
     async_original = getattr(httpx.AsyncClient, "_send_single_request", None)
     if sync_original is None or async_original is None:
-        logger.warning("httpx version not supported for outbound policy checks")
+        _status["httpx"] = "unsupported"
         return False
     if not getattr(sync_original, "_traccia_outbound", False):
         def send_single(self: Any, request: Any, *args: Any, **kwargs: Any):
@@ -143,9 +180,39 @@ def _patch_httpx() -> bool:
         send_single_async._traccia_outbound = True  # type: ignore[attr-defined]
         httpx.AsyncClient._send_single_request = send_single_async
     _patched["httpx"] = True
+    _status["httpx"] = "patched"
     return True
 
 
+def patch_status() -> dict:
+    """Which HTTP clients are checked: "patched", "not_installed" or "unsupported" each."""
+    return dict(_status)
+
+
+def _warn_unchecked() -> None:
+    if not enabled():
+        return
+    for client, state in _status.items():
+        if state == "unsupported" and client not in _warned:
+            _warned.add(client)
+            version = ""
+            try:
+                version = " " + __import__(client).__version__
+            except Exception:
+                pass
+            logger.warning(
+                "check_outbound_http is on, but %s%s is not supported: its requests are NOT checked. "
+                "Supported: requests>=2.25, httpx>=0.23.",
+                client, version,
+            )
+
+
 def patch_outbound_http() -> dict:
-    """Install the checks on the HTTP clients that are installed. Safe to call twice."""
-    return {"requests": _patch_requests(), "httpx": _patch_httpx()}
+    """Install the checks on the installed HTTP clients. Safe to call twice.
+
+    Returns {client: True/False} for whether each one is checked; see
+    ``patch_status()`` for why a client is not.
+    """
+    result = {"requests": _patch_requests(), "httpx": _patch_httpx()}
+    _warn_unchecked()
+    return result

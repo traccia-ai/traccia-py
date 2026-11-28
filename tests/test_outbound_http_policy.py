@@ -208,3 +208,55 @@ def test_patching_twice_is_harmless():
     first = outbound_http.patch_outbound_http()
     second = outbound_http.patch_outbound_http()
     assert first == second
+
+
+# --- the destination sent for the check carries no credentials ---------------------------
+
+@pytest.mark.parametrize("url, sent", [
+    ("https://user:secret@api.prod.example.com:8443/admin/x?token=abc&sig=1#frag",
+     "https://api.prod.example.com:8443/admin/x"),
+    ("https://api.prod.example.com/admin?X-Amz-Signature=abc", "https://api.prod.example.com/admin"),
+    ("http://[2001:db8::1]:8080/p?q=1", "http://[2001:db8::1]:8080/p"),
+    ("HTTPS://API.Example.COM", "https://api.example.com"),
+    ("not a url", ""),
+])
+def test_sanitize_destination(url, sent):
+    assert outbound_http.sanitize_destination(url) == sent
+
+
+def test_policy_check_receives_only_the_sanitized_destination():
+    checks = _Checks()
+    with patch("traccia.governance.pep.check_policy", checks), \
+            patch("traccia.client_config.resolve_credentials", return_value=TRACCIA), _governed():
+        outbound_http.check_request("post", "https://bob:pw@api.prod.example.com/admin?token=abc#x")
+    assert checks.seen == [("http_request", "POST", "https://api.prod.example.com/admin")]
+
+
+# --- which clients are actually checked ------------------------------------------------
+
+def test_patch_status_reports_patched_clients():
+    outbound_http.patch_outbound_http()
+    status = outbound_http.patch_status()
+    assert status["requests"] == "patched"
+    assert status["httpx"] == "patched"
+    from traccia.governance import outbound_http_status
+
+    assert outbound_http_status() == status
+
+
+def test_unsupported_httpx_is_reported_and_warned(caplog, monkeypatch):
+    import httpx
+
+    monkeypatch.setitem(outbound_http._patched, "httpx", False)
+    monkeypatch.setattr(outbound_http, "_warned", set())
+    monkeypatch.delattr(httpx.Client, "_send_single_request")
+    caplog.set_level("WARNING", logger="traccia.governance")
+    result = outbound_http.patch_outbound_http()
+    assert result["httpx"] is False
+    assert outbound_http.patch_status()["httpx"] == "unsupported"
+    assert any("NOT checked" in r.getMessage() and "httpx" in r.getMessage() for r in caplog.records)
+    # Warned once, not on every call.
+    caplog.clear()
+    outbound_http.patch_outbound_http()
+    assert not caplog.records
+    monkeypatch.setitem(outbound_http._status, "httpx", "patched")
