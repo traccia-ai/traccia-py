@@ -176,6 +176,8 @@ See [all policies](https://traccia.ai/docs/platform/policies/). Each one runs in
 
 If Traccia can't be reached, the check blocks the call by default. You can let calls through instead under **Settings → Policy Enforcement**, or locally with `init(policy_fail_mode="open")`. See [Governance in the SDK](https://traccia.ai/docs/sdk/governance/).
 
+To also check plain HTTP requests your agent sends (not only governed tools), pass `init(check_outbound_http=True)`. Each redirect hop is checked, so an Environment Boundary policy can stop an agent outside production from reaching a production URL.
+
 ### Can't add the SDK? Use the Gateway
 
 For an agent you can't change, such as a closed-source tool or an n8n workflow, point its OpenAI, Anthropic or Gemini client at the [Traccia Gateway](https://traccia.ai/docs/platform/gateway/): change the base URL and add two Traccia headers. You keep your own provider key. The Gateway checks each model call, but it can't see tools or the rest of the run:

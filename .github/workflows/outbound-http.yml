@@ -1,0 +1,57 @@
+name: Outbound HTTP checks
+
+# TRC-307: outbound HTTP policy checks patch requests and httpx internals.
+# Run them against the oldest and newest supported httpx so an unsupported
+# version is caught here, not silently left unchecked in a customer's app.
+
+on:
+  pull_request:
+    paths:
+      - "governance/outbound_http.py"
+      - "governance/__init__.py"
+      - "tests/test_outbound_http_policy.py"
+      - ".github/workflows/outbound-http.yml"
+  push:
+    branches: [main]
+    paths:
+      - "governance/outbound_http.py"
+      - "tests/test_outbound_http_policy.py"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        httpx: ["0.23.*", "0.27.*", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          if [ "${{ matrix.httpx }}" = "latest" ]; then
+            pip install --upgrade httpx
+          else
+            pip install "httpx==${{ matrix.httpx }}"
+          fi
+          python -c "import httpx; print('httpx', httpx.__version__)"
+
+      - name: Outbound HTTP tests
+        run: python -m pytest -q tests/test_outbound_http_policy.py
+
+      - name: Every installed client is patched
+        run: |
+          python -c "
+          from traccia.governance import outbound_http
+          outbound_http.patch_outbound_http()
+          status = outbound_http.patch_status()
+          print(status)
+          assert status == {'requests': 'patched', 'httpx': 'patched'}, status
+          "
