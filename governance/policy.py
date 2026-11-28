@@ -33,6 +33,36 @@ class AgentBlockedError(Exception):
         self.reasons = reasons or []
 
 
+IDEMPOTENCY_REPEAT = "idempotency_repeat"
+IDEMPOTENCY_UNCONFIRMED = "idempotency_unconfirmed"
+IDEMPOTENCY_IN_FLIGHT = "idempotency_in_flight"
+IDEMPOTENCY_DENY_REASONS = (IDEMPOTENCY_REPEAT, IDEMPOTENCY_UNCONFIRMED, IDEMPOTENCY_IN_FLIGHT)
+
+
+class IdempotencyRepeat(AgentBlockedError):
+    """An idempotent tool was denied as a repeat of a call with the same key.
+
+    ``reason`` is ``idempotency_repeat`` (the earlier call finished), ``idempotency_unconfirmed``
+    (it timed out or was cancelled, so it may or may not have happened) or
+    ``idempotency_in_flight`` (it is still running). ``already_done`` is True only for a finished
+    one, so a compound tool retried after a later step failed can skip a step that already ran::
+
+        try:
+            charge(order_id, amount)
+        except traccia.IdempotencyRepeat as exc:
+            if not exc.already_done:
+                raise
+    """
+
+    def __init__(self, message: str, *, reason: str, **kwargs):
+        super().__init__(message, **kwargs)
+        self.reason = reason
+
+    @property
+    def already_done(self) -> bool:
+        return self.reason == IDEMPOTENCY_REPEAT
+
+
 class GovernanceConfigError(AgentBlockedError):
     """@govern or a policy check is missing its API key, endpoint or agent ID.
 
@@ -73,7 +103,7 @@ class AgentStatusCache:
         self.ttl_seconds = ttl_seconds
         self._cache: Dict[Any, Tuple[float, str, Optional[str]]] = {}
         # When the request behind each entry was sent (fail_mode clock): a status
-        # fetched before the key was rejected no longer holds (TRC-342).
+        # fetched before the key was rejected no longer holds.
         self._sent_at: Dict[Any, float] = {}
         self._lock = threading.Lock()
 

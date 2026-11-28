@@ -69,8 +69,9 @@ def govern(
     applies: your Traccia setting (Settings -> Policy Enforcement), else block.
     policy_fail_mode="open" or "closed" overrides it for this run and the checks
     inside it, and only then: a rejected API key, a block, a deny or a missing
-    API key, endpoint or agent ID always stops the call. fail_open is deprecated
-    (True = "open", False = "closed").
+    API key, endpoint or agent ID always stops the call. An idempotent tool is
+    blocked whatever the fail mode: only Traccia can give its downstream key.
+    fail_open is deprecated (True = "open", False = "closed").
 
     Requires a Traccia account (API key + endpoint). Tracing-only or self-hosted
     setups should use @observe instead.

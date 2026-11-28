@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         # Keep in sync with the Python classifiers in pyproject.toml.
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout code

@@ -16,10 +16,14 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from traccia import client_config
 from traccia.governance import evidence, fail_mode
+from traccia.governance.idempotency import OUTCOME_COMMIT, OUTCOME_RELEASE, Outcome
+from traccia.governance.serialization import json_safe as _json_safe  # noqa: F401 - re-exported for callers
 from traccia.governance.policy import (
     AgentBlockedError,
     ApprovalPending,
     GovernanceConfigError,
+    IDEMPOTENCY_DENY_REASONS,
+    IdempotencyRepeat,
     _derive_base_url,
     _http_session,
     rejected_error,
@@ -38,6 +42,9 @@ _last_reads = evidence.last_reads
 _retrieval_by_trace = evidence.retrieval_by_trace
 _prompt_by_trace = evidence.prompt_by_trace
 _PROMPT_KEYS = ("traccia.prompt.name", "traccia.prompt.label", "traccia.prompt.version_id")
+# Span attributes of an idempotent tool call.
+SETTLE_FAILED_ATTRIBUTE = "traccia.idempotency.settle_failed"
+DOWNSTREAM_KEY_ATTRIBUTE = "traccia.idempotency.downstream_key"
 
 
 def _enrich_blocked(exc: AgentBlockedError, decision: Dict[str, Any]) -> AgentBlockedError:
@@ -113,6 +120,17 @@ def _stamp_span(decision: Dict[str, Any]) -> None:
             span.set_attribute("traccia.policy.reason", str(reasons[0])[:500])
     except Exception:
         logger.debug("Could not stamp policy attributes on span", exc_info=True)
+
+
+def _stamp_attribute(key: str, value: Any) -> None:
+    try:
+        from traccia.context import get_current_span
+
+        span = get_current_span()
+        if span:
+            span.set_attribute(key, value)
+    except Exception:
+        logger.debug("Could not stamp %s on span", key, exc_info=True)
 
 
 def _cache_budget(agent_id: str, remaining: Optional[float]) -> None:
@@ -326,7 +344,7 @@ def valid_decision(decision: Any) -> bool:
 
 
 def _unresolved(ident: fail_mode.Identity, started_at: float, reason: str, detail: str) -> Dict[str, Any]:
-    """No decision from Traccia: apply the fail mode (TRC-342).
+    """No decision from Traccia: apply the fail mode.
 
     A rejection of the key after this check was sent wins over any fail mode.
     """
@@ -425,8 +443,21 @@ def check_policy(
             decision_id=decision.get("id"),
         )
     if effect == "deny":
-        raise _enrich_blocked(AgentBlockedError(_blocked_message(decision)), decision)
+        raise _enrich_blocked(_blocked_error(decision), decision)
     return decision
+
+
+def _blocked_error(decision: Dict[str, Any]) -> AgentBlockedError:
+    """AgentBlockedError for a deny; IdempotencyRepeat when an idempotency repeat caused it, so
+    a compound tool can tell a step an earlier attempt finished from any other block.
+
+    Only ``obligations.idempotency_denied`` says that: the reasons list also holds Observe
+    policies' reasons, which may sit beside another policy's deny."""
+    obligations = decision.get("obligations") or {}
+    reason = obligations.get("idempotency_denied") if isinstance(obligations, dict) else None
+    if reason not in IDEMPOTENCY_DENY_REASONS:
+        return AgentBlockedError(_blocked_message(decision))
+    return IdempotencyRepeat(_blocked_message(decision), reason=reason)
 
 
 def reserved_usd(decision: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -462,17 +493,27 @@ def settle_policy(
     input_tokens: Optional[float] = None,
     output_tokens: Optional[float] = None,
     target: Optional[SettleTarget] = None,
+    outcome: Optional[Outcome] = None,
 ) -> None:
     """Settle the call's reservation.
 
     Without ``actual_usd`` the server prices the call from ``model``, ``vendor`` and the
     token counts; with none of them it releases the reservation. ``target``: the
     settle_target() of the call's policy check; without it, the current credentials and agent.
+    ``outcome``: a tool call's outcome; it sets ``release`` (every outcome but commit releases
+    the reservation) and settles the idempotency key. Without it, the key is committed, or
+    released with ``release``.
     """
+    if outcome is not None:
+        release = outcome != OUTCOME_COMMIT
     if not decision:
         return
-    reserved = (decision.get("obligations") or {}).get("reserved_usd")
-    if reserved is None:
+    obligations = decision.get("obligations") or {}
+    reserved = obligations.get("reserved_usd")
+    idempotency = obligations.get("idempotency")
+    if not isinstance(idempotency, dict):
+        idempotency = None
+    if reserved is None and idempotency is None:
         return
     if target is not None:
         api_key, endpoint, agent_id = target
@@ -480,28 +521,65 @@ def settle_policy(
         api_key, endpoint = _credentials()
         agent_id = _agent_id()
     if not api_key or not endpoint or not agent_id:
+        if idempotency is not None:
+            _stamp_attribute(SETTLE_FAILED_ATTRIBUTE, True)
         return
     trace_id, _span_id = _trace_ids()
+    body = {
+        "agent_id": agent_id,
+        "trace_id": trace_id,
+        "reserved_usd": reserved,
+        "actual_usd": actual_usd,
+        "release": release,
+        "model": model,
+        "vendor": vendor,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if idempotency is None:
+        try:
+            base = _derive_base_url(endpoint)
+            _http_session.post(f"{base}{SETTLE_PATH}", headers=headers, json=body, timeout=2)
+        except Exception as exc:
+            logger.debug("policy settle failed: %s", exc)
+        return
+    # Settle the idempotency key. An exception or a 5xx is tried once more; a 4xx or
+    # {"ok": false} is lost (a retry would not help). Either way the failure is stamped on the
+    # span and swallowed.
+    if reserved is None:
+        del body["reserved_usd"]
+    if outcome is None:
+        outcome = OUTCOME_RELEASE if release else OUTCOME_COMMIT
+    body["idempotency"] = {**idempotency, "outcome": outcome}
+    for _attempt in range(2):
+        try:
+            base = _derive_base_url(endpoint)
+            response = _http_session.post(f"{base}{SETTLE_PATH}", headers=headers, json=body, timeout=2)
+        except Exception as exc:
+            logger.debug("idempotency settle failed: %s", exc)
+            continue
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and status >= 500:
+            logger.debug("idempotency settle failed: HTTP %s", status)
+            continue
+        if _settle_lost(response, status):
+            logger.warning("idempotency settle was not applied (HTTP %s)", status)
+            _stamp_attribute(SETTLE_FAILED_ATTRIBUTE, True)
+        return
+    logger.warning("idempotency settle failed after two attempts")
+    _stamp_attribute(SETTLE_FAILED_ATTRIBUTE, True)
+
+
+def _settle_lost(response: Any, status: Any) -> bool:
+    """A settle the server answered but did not apply: a 4xx, or a 2xx with ``ok`` false."""
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
     try:
-        base = _derive_base_url(endpoint)
-        _http_session.post(
-            f"{base}{SETTLE_PATH}",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "agent_id": agent_id,
-                "trace_id": trace_id,
-                "reserved_usd": reserved,
-                "actual_usd": actual_usd,
-                "release": release,
-                "model": model,
-                "vendor": vendor,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            },
-            timeout=2,
-        )
-    except Exception as exc:
-        logger.debug("policy settle failed: %s", exc)
+        reply = response.json()
+    except Exception:
+        return False
+    return isinstance(reply, dict) and reply.get("ok") is False
 
 
 # Tokens one image is counted as in a prompt estimate, in the range vision models charge for a
@@ -746,6 +824,21 @@ def _settle_done(future: Future) -> None:
         _pending_settles.discard(future)
 
 
+def _submit_settle(fn: Callable[..., None], /, *args: Any, **kwargs: Any) -> None:
+    """Run ``fn(*args, **kwargs)`` on a settle worker, in a copy of the current context, so it
+    settles for the agent (and span) that made the call. flush_pending_settles() waits for it."""
+    ctx = contextvars.copy_context()
+    try:
+        future = _settle_pool().submit(ctx.run, fn, *args, **kwargs)
+    except RuntimeError:
+        # The interpreter is shutting down (e.g. a stream finalized at exit): settle here.
+        ctx.run(fn, *args, **kwargs)
+        return
+    with _settle_lock:
+        _pending_settles.add(future)
+    future.add_done_callback(_settle_done)
+
+
 def finish_llm_call_in_background(decision: Optional[Dict[str, Any]], **kwargs: Any) -> None:
     """finish_llm_call() on a worker thread, so a slow policy server does not delay the caller.
 
@@ -754,16 +847,7 @@ def finish_llm_call_in_background(decision: Optional[Dict[str, Any]], **kwargs: 
     """
     if reserved_usd(decision) is None:
         return  # nothing was reserved, so there is nothing to settle
-    ctx = contextvars.copy_context()
-    try:
-        future = _settle_pool().submit(ctx.run, finish_llm_call, decision, **kwargs)
-    except RuntimeError:
-        # The interpreter is shutting down (e.g. a stream finalized at exit): settle here.
-        ctx.run(finish_llm_call, decision, **kwargs)
-        return
-    with _settle_lock:
-        _pending_settles.add(future)
-    future.add_done_callback(_settle_done)
+    _submit_settle(finish_llm_call, decision, **kwargs)
 
 
 # Blocking work for async LLM calls (the policy check), run off the event loop.
@@ -812,19 +896,33 @@ def _check_with_target(
     return enforce_llm_call(kwargs, vendor=vendor, api=api), target
 
 
-def _release_late_check(done: Optional[Future]) -> None:
-    """The caller was cancelled during its policy check: release what the check reserved, as
-    the call will never be made. A background settle, so flush_pending_settles() waits for it."""
-    if done is None:
-        return  # the check never started: nothing reserved
-    try:
-        decision, target = done.result()
-    except BaseException:
-        return  # the check failed: nothing reserved
-    try:
-        finish_llm_call_in_background(decision, target=target, release=True)
-    except Exception:
-        pass
+def _late_release(
+    settle: Callable[[Optional[Dict[str, Any]], Optional[SettleTarget]], None],
+) -> Callable[[Optional[Future]], None]:
+    """An ``if_cancelled`` for run_off_loop() around a check that returns (decision, target): the
+    caller was cancelled during its policy check, so the call will never be made and ``settle``
+    gets what the check reserved. It must settle in the background, so flush_pending_settles()
+    waits for it."""
+
+    def release(done: Optional[Future]) -> None:
+        if done is None:
+            return  # the check never started: nothing reserved
+        try:
+            decision, target = done.result()
+        except BaseException:
+            return  # the check failed: nothing reserved
+        try:
+            settle(decision, target)
+        except Exception:
+            pass
+
+    return release
+
+
+# An LLM call releases its reservation.
+_release_late_check = _late_release(
+    lambda decision, target: finish_llm_call_in_background(decision, target=target, release=True)
+)
 
 
 async def enforce_llm_call_off_loop(
@@ -841,11 +939,9 @@ async def enforce_llm_call_off_loop(
     return await run_off_loop(_check_with_target, kwargs, vendor, api, if_cancelled=_release_late_check)
 
 
-# Work handed off by garbage-collection finalizers (a stream dropped unfinished). The collector
-# runs them on whatever thread it interrupts, possibly inside a lock that finalizing the call
-# takes (an HTTP connection pool's, ThreadPoolExecutor.submit()'s) or while other code is half
-# done, so they only put the work here: SimpleQueue.put() is safe there, as nothing else is. A
-# worker thread runs it, and run_handed_off() runs what is left (flush_pending_settles()).
+# Work handed off by garbage-collection finalizers (a stream dropped unfinished). A finalizer can
+# run inside a lock that finishing the call takes, so it only does SimpleQueue.put(), which is
+# safe there; a worker thread runs the work, and run_handed_off() runs what is left.
 _handed_off: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
 _handoff_worker: Optional[threading.Thread] = None
 _handoff_pid: Optional[int] = None
@@ -897,12 +993,9 @@ _OFF_THREAD_GRACE_S = 0.25
 def _run_off_this_thread(work: Callable[[], None], timeout: Optional[float]) -> None:
     """Run ``work`` on a new thread and wait for it, up to ``timeout`` seconds.
 
-    Shutdown work (stopping a call, closing its response, starting its settle) takes locks
-    that the calling thread may hold: stop_tracing() can run in a signal handler that
-    interrupted this thread inside httpcore's connection pool or ThreadPoolExecutor.submit().
-    On another thread that work waits for the lock instead of deadlocking, and this thread
-    returns at the time limit. Runs here only when no thread can be started (interpreter
-    exit).
+    Shutdown work takes locks the calling thread may hold (stop_tracing() in a signal handler
+    that interrupted a connection pool), so on another thread it waits instead of deadlocking.
+    Runs here only when no thread can be started (interpreter exit).
     """
     done = threading.Event()
 
@@ -954,11 +1047,9 @@ def _flush(timeout: Optional[float], caller: int) -> None:
         wait(pending, timeout=remaining())
 
 
-# LLM calls still in flight: an open stream, or a request that has not returned. Each has
-# settle_at_shutdown(timeout, caller) and may have check_pending (True while its policy check
-# runs) and finish_pending(timeout, caller); ``caller`` is the thread that asked, which the
-# work runs off. A call stays here until its finalization has ended. Weak, so
-# a call that is dropped and collected is not kept alive here.
+# LLM calls still in flight (an open stream, or a request that has not returned), until their
+# finalization ends. Each has settle_at_shutdown(timeout, caller) and may have check_pending and
+# finish_pending(timeout, caller). Weak, so a dropped call can still be collected.
 _open_calls: "weakref.WeakSet[Any]" = weakref.WeakSet()
 _open_calls_hook = False
 
@@ -985,11 +1076,9 @@ def settle_open_calls(timeout: float = 10.0) -> None:
     ``timeout`` seconds. Each call is stopped where possible and charged what it reported,
     or its reservation when that is unknown. Run by stop_tracing() and at interpreter exit.
 
-    Calls dropped unfinished whose finalization was handed off are finalized first, as
-    dropped. A call whose policy check is still running is settled once the check returns,
-    so the reservation it makes is settled; those calls go last, as they may wait for their
-    checks (see settle_at_shutdown(timeout)). The work runs off this thread (see
-    _run_off_this_thread()), and is waited for.
+    Handed-off dropped calls are finalized first. Calls whose policy check is still running go
+    last and settle once it returns, so its reservation is settled too. The work runs off this
+    thread (see _run_off_this_thread()).
     """
     caller = threading.get_ident()
     _run_off_this_thread(lambda: _settle_open_calls(timeout, caller), timeout)
@@ -1034,18 +1123,10 @@ if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_after_fork)
 
 
-def enforce_tool_call(name: str, arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    if not runtime_config.pep_enabled():
-        return None
-    payload = arguments or {}
-    context: Dict[str, Any] = {"input": payload, "tool_name": name}
-    freshness = _freshness_context(_resource_id(payload))
-    if freshness:
-        context["freshness"] = freshness
-    customer_id = _customer_id(payload)
-    if customer_id:
-        context["customer_id"] = customer_id
-    return check_policy(
-        action={"type": "tool_call", "name": name},
-        context=context,
-    )
+# Re-exported for callers. Imported last, as tool_call imports this module (a cycle).
+from traccia.governance.tool_call import (  # noqa: E402,F401
+    ToolCallSettle,
+    async_governed_tool_call,
+    enforce_tool_call,
+    governed_tool_call,
+)
